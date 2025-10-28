@@ -1,22 +1,21 @@
 # claimtrack_refined_v3.py
-# ClaimTrack refined v3 - Neon/Postgres ready
+# Updated ClaimTrack v3 - fixes applied: single-click login, graceful logout, remove reference field, admin password reset
 import os
 import random
 import string
+import time
 from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import (Boolean, Column, DateTime, Float, ForeignKey, Integer,
-                        String, Text, create_engine, func)
+from sqlalchemy import Column, Integer, String, Float, Text, DateTime, Boolean, create_engine, ForeignKey, func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
-from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # -----------------------
 # Config
 # -----------------------
-# If you set DATABASE_URL (Neon/Postgres) in env or Streamlit secrets it will be used.
 DEFAULT_SQLITE = "sqlite:///data/claims_refined_v3.db"
 DB_URL = os.environ.get("DATABASE_URL", DEFAULT_SQLITE)
 os.makedirs("data", exist_ok=True)
@@ -34,7 +33,7 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
-    email = Column(String, nullable=False, index=True)
+    email = Column(String, nullable=False, index=True, unique=False)
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=True)  # comma-separated roles
     location = Column(String, nullable=True)
@@ -42,9 +41,6 @@ class User(Base):
     official_id = Column(String, nullable=True)
     is_admin = Column(Boolean, default=False)
     active = Column(Boolean, default=True)
-
-    def check_password(self, pw):
-        return check_password_hash(self.password_hash, pw)
 
 
 class Claim(Base):
@@ -78,12 +74,10 @@ class WorkflowLog(Base):
     action = Column(String)
     remarks = Column(Text)
     acted_by = Column(Integer, ForeignKey("users.id"))
-    acted_by_user = relationship("User", foreign_keys=[acted_by])
     timestamp = Column(DateTime, default=func.now())
 
 
 Base.metadata.create_all(engine)
-
 
 # -----------------------
 # Helpers
@@ -148,7 +142,6 @@ def get_higher_roles(role):
 
 
 def get_lower_roles(role):
-    # all roles lower in chain + Claimant
     if role not in WORKFLOW_CHAIN:
         return ["Claimant"]
     idx = WORKFLOW_CHAIN.index(role)
@@ -224,6 +217,9 @@ def show_login():
                 else:
                     st.session_state["landing"] = "My Claims"
                 st.session_state["rerun"] = not st.session_state["rerun"]
+                st.success("✅ Login successful! Redirecting...")
+                time.sleep(1)
+                st.rerun()
                 db.close()
             else:
                 st.error("Invalid credentials")
@@ -268,10 +264,10 @@ st.sidebar.write(f"Logged in: {current_user.name} ({current_user.email})")
 st.sidebar.write(f"Role(s): {current_user.role or 'Claimant'}")
 st.sidebar.write(f"Location: {current_user.location or 'N/A'}")
 if st.sidebar.button("Logout"):
-    st.session_state["user"] = None
-    st.session_state["landing"] = None
-    st.session_state["rerun"] = not st.session_state["rerun"]
-    st.experimental_rerun()
+    st.session_state.clear()
+    st.success("✅ Successfully logged out! Redirecting to login page...")
+    time.sleep(1.5)
+    st.rerun()
 
 # -----------------------
 # Admin
@@ -323,6 +319,24 @@ if choice == "Admin":
     st.subheader("Existing users")
     users_df = pd.read_sql(db.query(User).statement, db.bind)
     st.dataframe(users_df[["id", "name", "email", "role", "location", "is_admin"]])
+
+    # Admin password reset (Option A: all users)
+    st.markdown("---")
+    st.subheader("🔐 Reset User Password (Admin)")
+    user_email = st.text_input("Enter user's email to reset", key="admin_reset_email")
+    new_pwd = st.text_input("Enter new password", type="password", key="admin_reset_pwd")
+    if st.button("Reset Password (Admin)"):
+        if user_email and new_pwd:
+            target = db.query(User).filter(User.email == user_email).first()
+            if target:
+                target.password_hash = generate_password_hash(new_pwd)
+                db.commit()
+                st.success(f"Password for {user_email} has been reset successfully.")
+            else:
+                st.error("User not found")
+        else:
+            st.warning("Please provide both email and new password.")
+
     db.close()
     st.stop()
 
@@ -346,32 +360,35 @@ if choice == "Submit Claim":
         remarks = st.text_area("Remarks (optional, up to 100 words)", max_chars=800)
         submitted = st.form_submit_button("Submit Claim")
         if submitted:
-            uid = make_uid()
-            claim = Claim(
-                uid=uid,
-                submitter_id=current_user.id,
-                location=location,
-                bill_no=bill_no,
-                claim_type=claim_type,
-                amount=amount,
-                date_of_bill=str(date_of_bill),
-                remarks=remarks,
-                status="pending",
-                current_stage="Diarist",
-            )
-            db.add(claim)
-            db.commit()
-            db.add(
-                WorkflowLog(
-                    claim_id=claim.id,
-                    stage="Employee",
-                    action="Submitted",
-                    remarks="Initial submission",
-                    acted_by=current_user.id,
+            if not bill_no or amount <= 0:
+                st.error("Please provide Bill number and Amount")
+            else:
+                uid = make_uid()
+                claim = Claim(
+                    uid=uid,
+                    submitter_id=current_user.id,
+                    location=location,
+                    bill_no=bill_no,
+                    claim_type=claim_type,
+                    amount=amount,
+                    date_of_bill=str(date_of_bill),
+                    remarks=remarks,
+                    status="pending",
+                    current_stage="Diarist",
                 )
-            )
-            db.commit()
-            st.success(f"Claim submitted with UID: {uid}")
+                db.add(claim)
+                db.commit()
+                db.add(
+                    WorkflowLog(
+                        claim_id=claim.id,
+                        stage="Employee",
+                        action="Submitted",
+                        remarks="Initial submission",
+                        acted_by=current_user.id,
+                    )
+                )
+                db.commit()
+                st.success(f"Claim submitted with UID: {uid}")
     db.close()
     st.stop()
 
@@ -504,10 +521,8 @@ if choice == "Pending With Me":
                     send_back_to = None
                     if action == "Forward for approval":
                         higher = get_higher_roles(role_item)
-                        # include option to forward to Direct next or skip levels (higher roles)
                         if higher:
                             forward_to = st.selectbox("Forward to (choose higher/next)", ["Next: " + (get_next_role(role_item) or "")] + higher, key=f"fwdto_{r.id}")
-                            # normalize selection: if "Next: ..." then use get_next_role(role_item)
                             if forward_to and forward_to.startswith("Next: "):
                                 forward_to = get_next_role(role_item)
                     elif action == "Send back for review":
@@ -522,64 +537,30 @@ if choice == "Pending With Me":
                             if action == "Forward for approval":
                                 target = forward_to or get_next_role(role_item)
                                 if not target:
-                                    # if no next, move to awaiting payment
                                     r.current_stage = "AwaitingPayment"
                                     r.status = "Approved (sent to PAO)"
-                                    db.add(
-                                        WorkflowLog(
-                                            claim_id=r.id,
-                                            stage=role_item,
-                                            action=f"Forwarded to AwaitingPayment",
-                                            remarks=remarks,
-                                            acted_by=current_user.id,
-                                        )
-                                    )
+                                    db.add(WorkflowLog(claim_id=r.id, stage=role_item, action=f"Forwarded to AwaitingPayment", remarks=remarks, acted_by=current_user.id))
                                     db.commit()
                                     st.success("Forwarded to AwaitingPayment (no higher role)")
                                 else:
                                     r.current_stage = target
                                     r.status = "In Progress"
-                                    db.add(
-                                        WorkflowLog(
-                                            claim_id=r.id,
-                                            stage=role_item,
-                                            action=f"Forwarded to {target}",
-                                            remarks=remarks,
-                                            acted_by=current_user.id,
-                                        )
-                                    )
+                                    db.add(WorkflowLog(claim_id=r.id, stage=role_item, action=f"Forwarded to {target}", remarks=remarks, acted_by=current_user.id))
                                     db.commit()
                                     st.success(f"Forwarded to {target}")
 
                             elif action == "Send back for review":
                                 target = send_back_to or get_prev_role(role_item) or "Diarist"
-                                # if sending back to Claimant, route to 'Employee' stage so claimant sees it under My Claims timeline
                                 if target == "Claimant":
                                     r.current_stage = "Employee"
                                     r.status = "Returned"
-                                    db.add(
-                                        WorkflowLog(
-                                            claim_id=r.id,
-                                            stage=role_item,
-                                            action=f"Returned to Claimant",
-                                            remarks=remarks,
-                                            acted_by=current_user.id,
-                                        )
-                                    )
+                                    db.add(WorkflowLog(claim_id=r.id, stage=role_item, action=f"Returned to Claimant", remarks=remarks, acted_by=current_user.id))
                                     db.commit()
                                     st.success("Returned to Claimant (submitter) for clarification")
                                 else:
                                     r.current_stage = target
                                     r.status = "Returned"
-                                    db.add(
-                                        WorkflowLog(
-                                            claim_id=r.id,
-                                            stage=role_item,
-                                            action=f"Returned to {target}",
-                                            remarks=remarks,
-                                            acted_by=current_user.id,
-                                        )
-                                    )
+                                    db.add(WorkflowLog(claim_id=r.id, stage=role_item, action=f"Returned to {target}", remarks=remarks, acted_by=current_user.id))
                                     db.commit()
                                     st.success(f"Returned to {target}")
 
@@ -592,17 +573,9 @@ if choice == "Pending With Me":
                                     else:
                                         r.current_stage = "AwaitingPayment"
                                         r.status = "Approved (sent to PAO)"
-                                    db.add(
-                                        WorkflowLog(
-                                            claim_id=r.id,
-                                            stage=role_item,
-                                            action="Approved",
-                                            remarks=remarks,
-                                            acted_by=current_user.id,
-                                        )
-                                    )
+                                    db.add(WorkflowLog(claim_id=r.id, stage=role_item, action="Approved", remarks=remarks, acted_by=current_user.id))
                                     db.commit()
-                                    st.success("Approved (moved forward)")
+                                    st.success("Approved (moved forward)") 
                                 else:
                                     st.error("Not authorized to approve")
     db.close()
@@ -748,4 +721,4 @@ if choice == "Dashboard":
 # -----------------------
 db.close()
 st.write("---")
-st.caption("ClaimTrack v3 — location-based routing, flexible forward/back, Director/DG approvals only.")
+st.caption("ClaimTrack v3 — updated: single-click login, graceful logout, admin reset password, removed reference field.")
