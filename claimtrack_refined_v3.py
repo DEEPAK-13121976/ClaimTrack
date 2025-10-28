@@ -1,5 +1,5 @@
 # claimtrack_refined_v3.py
-# Updated ClaimTrack v3 - fixes applied: single-click login, graceful logout, remove reference field, admin password reset
+# ClaimTrack v3 — Update: remove bill number from submission; Admin user soft-delete (anonymize)
 import os
 import random
 import string
@@ -50,7 +50,7 @@ class Claim(Base):
     submitter_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     submitter = relationship("User", foreign_keys=[submitter_id])
     location = Column(String, nullable=True)
-    bill_no = Column(String, nullable=True)
+    bill_no = Column(String, nullable=True)   # kept for backward compatibility but not populated by new UI
     claim_type = Column(String, nullable=False)
     amount = Column(Float, nullable=True)
     date_of_bill = Column(String, nullable=True)
@@ -173,7 +173,7 @@ def show_signup():
         submitted = st.form_submit_button("Sign Up")
         if submitted:
             db = get_db()
-            if db.query(User).filter(User.email == email).first():
+            if db.query(User).filter(User.email == email, User.active == True).first():
                 st.error("Email exists. Please login or contact admin to assign approver roles.")
                 db.close()
                 return
@@ -327,26 +327,70 @@ if choice == "Admin":
     new_pwd = st.text_input("Enter new password", type="password", key="admin_reset_pwd")
     if st.button("Reset Password (Admin)"):
         if user_email and new_pwd:
-            target = db.query(User).filter(User.email == user_email).first()
+            target = db.query(User).filter(User.email == user_email, User.active == True).first()
             if target:
                 target.password_hash = generate_password_hash(new_pwd)
                 db.commit()
                 st.success(f"Password for {user_email} has been reset successfully.")
             else:
-                st.error("User not found")
+                st.error("User not found or inactive")
         else:
             st.warning("Please provide both email and new password.")
 
+    st.markdown("---")
+    st.subheader("🗑️ Delete (Deactivate) a user")
+    # list non-admin active users except current admin
+    candidates = db.query(User).filter(User.active == True).all()
+    candidate_options = []
+    for u in candidates:
+        if u.id == current_user.id:
+            continue
+        if u.is_admin:
+            continue
+        candidate_options.append((u.id, f"{u.name} ({u.email})"))
+    if not candidate_options:
+        st.info("No deletable users available (cannot delete admins or yourself).")
+    else:
+        sel = st.selectbox("Select user to delete (admin only)", [opt[1] for opt in candidate_options], key="del_sel")
+        if st.button("Delete User (Admin)"):
+            # find selected id
+            sel_id = None
+            for tup in candidate_options:
+                if tup[1] == sel:
+                    sel_id = tup[0]
+                    break
+            if sel_id:
+                target = db.query(User).get(sel_id)
+                if target:
+                    # soft-delete: anonymize and deactivate, keep claims for audit
+                    target.active = False
+                    target.name = "Deleted user"
+                    target.email = f"deleted_{target.id}@disabled.local"
+                    target.role = ""
+                    db.commit()
+                    # optionally log a workflow note for claims by this user
+                    db.add(
+                        WorkflowLog(
+                            claim_id=None,
+                            stage="System",
+                            action="UserDeleted",
+                            remarks=f"User {sel} deactivated by {current_user.email}",
+                            acted_by=current_user.id,
+                        )
+                    )
+                    db.commit()
+                    st.success("User deactivated and anonymized. Their claims are retained for audit.")
+                else:
+                    st.error("Selected user not found")
     db.close()
     st.stop()
 
 # -----------------------
-# Submit Claim
+# Submit Claim (removed bill number/reference)
 # -----------------------
 if choice == "Submit Claim":
     st.header("Submit New Claim")
     with st.form("submit"):
-        bill_no = st.text_input("Bill number / reference")
         claim_type = st.selectbox("Claim Type", ["Medical", "Travel", "LTC", "Office Advance", "Other"])
         amount = st.number_input("Amount", min_value=0.0, value=0.0, format="%.2f")
         date_of_bill = st.date_input("Bill Date")
@@ -360,15 +404,15 @@ if choice == "Submit Claim":
         remarks = st.text_area("Remarks (optional, up to 100 words)", max_chars=800)
         submitted = st.form_submit_button("Submit Claim")
         if submitted:
-            if not bill_no or amount <= 0:
-                st.error("Please provide Bill number and Amount")
+            if amount <= 0:
+                st.error("Please provide Amount")
             else:
                 uid = make_uid()
                 claim = Claim(
                     uid=uid,
                     submitter_id=current_user.id,
                     location=location,
-                    bill_no=bill_no,
+                    # bill_no intentionally not populated (removed from UI)
                     claim_type=claim_type,
                     amount=amount,
                     date_of_bill=str(date_of_bill),
@@ -407,10 +451,13 @@ if choice == "My Claims":
         st.info("No claims found.")
     else:
         for r in rows:
+            submitter = db.query(User).get(r.submitter_id)
+            submitter_name = submitter.name if submitter else "Deleted user"
             st.markdown(
                 f"**UID:** {r.uid}  |  **Type:** {r.claim_type}  |  **Amount:** {r.amount}  | **Status:** {r.status} | **Stage:** {r.current_stage}"
             )
-            st.write(f"Submitted: {r.created_at} | Location: {r.location} | Bill No: {r.bill_no}")
+            st.write(f"Submitted: {r.created_at} | Location: {r.location} | Bill No: {r.bill_no or 'N/A'}")
+            st.write(f"Submitter: {submitter_name}")
             st.write(f"Remarks: {r.remarks}")
             logs = db.query(WorkflowLog).filter(WorkflowLog.claim_id == r.id).order_by(WorkflowLog.timestamp).all()
             if logs:
@@ -420,7 +467,7 @@ if choice == "My Claims":
                             "stage": L.stage,
                             "action": L.action,
                             "remarks": L.remarks,
-                            "acted_by": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else ""),
+                            "acted_by": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else "System"),
                             "timestamp": L.timestamp,
                         }
                         for L in logs
@@ -487,11 +534,13 @@ if choice == "Pending With Me":
             if not rows:
                 st.write("No items.")
             for r in rows:
+                submitter = db.query(User).get(r.submitter_id)
+                submitter_name = submitter.name if submitter else "Deleted user"
                 st.markdown(
                     f"**UID:** {r.uid} | **Type:** {r.claim_type} | **Amount:** {r.amount} | Submitted: {r.created_at}"
                 )
-                st.write(f"Submitter: {db.query(User).get(r.submitter_id).name} | Location: {r.location}")
-                st.write(f"Bill No: {r.bill_no} | Remarks: {r.remarks}")
+                st.write(f"Submitter: {submitter_name} | Location: {r.location}")
+                st.write(f"Bill No: {r.bill_no or 'N/A'} | Remarks: {r.remarks}")
                 logs = db.query(WorkflowLog).filter(WorkflowLog.claim_id == r.id).order_by(WorkflowLog.timestamp).all()
                 if logs:
                     df = pd.DataFrame(
@@ -499,7 +548,7 @@ if choice == "Pending With Me":
                             {
                                 "stage": L.stage,
                                 "action": L.action,
-                                "acted_by": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else ""),
+                                "acted_by": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else "System"),
                                 "timestamp": L.timestamp,
                                 "remarks": L.remarks,
                             }
@@ -598,15 +647,18 @@ if choice == "Processed Items":
                 continue
             if not has_role(current_user.role, "DG") and claim.location != current_user.location:
                 continue
+            submitter = db.query(User).get(claim.submitter_id)
+            submitter_name = submitter.name if submitter else "Deleted user"
             rows.append(
                 {
                     "claim_uid": claim.uid,
                     "stage": L.stage,
                     "action": L.action,
-                    "acted_by": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else ""),
+                    "acted_by": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else "System"),
                     "timestamp": L.timestamp,
                     "remarks": L.remarks,
                     "location": claim.location,
+                    "submitter": submitter_name,
                 }
             )
         if not rows:
@@ -649,6 +701,8 @@ if choice == "Dashboard":
     rows = query.all()
     data = []
     for r in rows:
+        submitter = db.query(User).get(r.submitter_id)
+        submitter_name = submitter.name if submitter else "Deleted user"
         days = (datetime.now() - (r.created_at or datetime.now())).days
         if days >= days_pending:
             data.append(
@@ -660,7 +714,7 @@ if choice == "Dashboard":
                     "stage": r.current_stage,
                     "created_at": r.created_at,
                     "location": r.location,
-                    "submitter": db.query(User).get(r.submitter_id).name,
+                    "submitter": submitter_name,
                 }
             )
     if not data:
@@ -695,8 +749,10 @@ if choice == "Dashboard":
             if not has_role(current_user.role, "DG") and claim.location != current_user.location:
                 st.error("Not authorized to view this claim (different location)")
             else:
+                submitter = db.query(User).get(claim.submitter_id)
+                submitter_name = submitter.name if submitter else "Deleted user"
                 st.write(
-                    f"UID {claim.uid} | Type: {claim.claim_type} | Amount: {claim.amount} | Stage: {claim.current_stage} | Status: {claim.status} | Location: {claim.location}"
+                    f"UID {claim.uid} | Type: {claim.claim_type} | Amount: {claim.amount} | Stage: {claim.current_stage} | Status: {claim.status} | Location: {claim.location} | Submitter: {submitter_name}"
                 )
                 logs = db.query(WorkflowLog).filter(WorkflowLog.claim_id == claim.id).order_by(WorkflowLog.timestamp).all()
                 df = pd.DataFrame(
@@ -705,7 +761,7 @@ if choice == "Dashboard":
                             "stage": L.stage,
                             "action": L.action,
                             "remarks": L.remarks,
-                            "acted_by": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else ""),
+                            "acted_by": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else "System"),
                             "timestamp": L.timestamp,
                         }
                         for L in logs
@@ -721,4 +777,4 @@ if choice == "Dashboard":
 # -----------------------
 db.close()
 st.write("---")
-st.caption("ClaimTrack v3 — updated: single-click login, graceful logout, admin reset password, removed reference field.")
+st.caption("ClaimTrack v3 — update: removed bill number from submission; added admin user deactivation (soft-delete).")
