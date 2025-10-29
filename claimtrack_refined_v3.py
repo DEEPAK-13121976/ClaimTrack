@@ -1,6 +1,7 @@
 # ==============================================================
-# ClaimTrack v3 — FINAL VERSION
+# ClaimTrack v3.3 — FINAL VERSION
 # Awaiting Budget (Auditor/AAO/SAO) + Enhanced Dashboard
+# + Unique Key Fix for Login/Signup
 # ==============================================================
 
 import os
@@ -98,8 +99,8 @@ def get_prev_role(role):
         return None
 
 # ---------------- STREAMLIT CONFIG -----------------
-st.set_page_config(page_title="ClaimTrack v3", layout="wide")
-st.title("ClaimTrack — Awaiting Budget Enabled")
+st.set_page_config(page_title="ClaimTrack v3.3", layout="wide")
+st.title("ClaimTrack — Awaiting Budget + Enhanced Dashboard")
 
 if "user" not in st.session_state:
     st.session_state["user"] = None
@@ -122,9 +123,9 @@ db.close()
 # ---------------- LOGIN -----------------
 def login():
     st.subheader("Login")
-    email = st.text_input("Email")
-    pwd = st.text_input("Password", type="password")
-    if st.button("Login"):
+    email = st.text_input("Email", key="login_email")
+    pwd = st.text_input("Password", type="password", key="login_pwd")
+    if st.button("Login", key="login_btn"):
         db = get_db()
         user = db.query(User).filter(User.email == email, User.active == True).first()
         if user and check_password_hash(user.password_hash, pwd):
@@ -145,11 +146,11 @@ def login():
 
 def signup():
     st.subheader("Claimant Sign-Up")
-    name = st.text_input("Full name")
-    email = st.text_input("Email")
-    pwd = st.text_input("Password", type="password")
-    loc = st.selectbox("Location", ["New Delhi", "Mumbai", "Kolkata", "Chennai", "Bangalore"])
-    if st.button("Sign Up"):
+    name = st.text_input("Full name", key="signup_name")
+    email = st.text_input("Email", key="signup_email")
+    pwd = st.text_input("Password", type="password", key="signup_pwd")
+    loc = st.selectbox("Location", ["New Delhi", "Mumbai", "Kolkata", "Chennai", "Bangalore"], key="signup_loc")
+    if st.button("Sign Up", key="signup_btn"):
         db = get_db()
         if db.query(User).filter(User.email == email).first():
             st.error("Email already exists")
@@ -175,7 +176,7 @@ if not st.session_state["user"]:
 db = get_db()
 user = db.query(User).get(st.session_state["user"]["id"])
 
-# Sidebar
+# ---------------- SIDEBAR -----------------
 menu = ["Submit Claim", "My Claims", "Pending With Me"]
 if has_role(user.role, "Director") or has_role(user.role, "DG"):
     menu.append("Dashboard")
@@ -190,12 +191,14 @@ if st.sidebar.button("Logout"):
     time.sleep(1)
     st.rerun()
 
-# ---------------- ADMIN -----------------
+# ---------------- ADMIN PANEL -----------------
 if choice == "Admin":
     if not user.is_admin:
         st.error("Admin only")
         st.stop()
     st.header("Admin Panel")
+
+    # Add or update users
     st.subheader("Create/Assign Roles")
     name = st.text_input("Name")
     email = st.text_input("Email")
@@ -219,6 +222,7 @@ if choice == "Admin":
                 db.commit()
                 st.success("User added.")
 
+    # Reset password
     st.markdown("---")
     st.subheader("Reset Password")
     reset_email = st.text_input("Email to reset")
@@ -232,6 +236,7 @@ if choice == "Admin":
         else:
             st.error("User not found")
 
+    # Deactivate user
     st.markdown("---")
     st.subheader("Deactivate User")
     users = db.query(User).filter(User.active == True, User.is_admin == False).all()
@@ -387,4 +392,4 @@ if choice == "Dashboard":
             fig3 = px.bar(df, x="Location", y="Amount", title="Total Amount by Location")
             st.plotly_chart(fig3)
 
-st.caption("ClaimTrack v3 — Awaiting Budget (Auditor/AAO/SAO) + Enhanced Dashboard Visuals")
+st.caption("ClaimTrack v3.3 — Awaiting Budget + Enhanced Dashboard + Unique Key Fix")
