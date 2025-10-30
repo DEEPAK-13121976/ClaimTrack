@@ -221,7 +221,7 @@ if choice == "Admin":
 if choice == "Submit Claim":
     st.header("Submit New Claim")
     with st.form("new_claim"):
-        ctype = st.selectbox("Claim Type", ["Medical","Travel","LTC","Office Advance","Other"])
+        ctype = st.selectbox("Claim Type", ["Medical","Travel","LTC"])
         amt = st.number_input("Amount", min_value=0.0)
         dob = st.date_input("Bill Date")
         remarks = st.text_area("Remarks (optional)")
