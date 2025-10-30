@@ -74,7 +74,6 @@ class WorkflowLog(Base):
     acted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     timestamp = Column(DateTime, default=func.now())
 
-Base.metadata.drop_all(engine)   # 🧹 Drop old tables (one-time use)
 Base.metadata.create_all(engine)
 
 # ---------------- HELPERS -----------------
