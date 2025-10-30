@@ -1,16 +1,15 @@
 # ==============================================================
-# DGACE-ESD Claim Track  (ClaimTrack v3.4)
+# DGACE-ESD Claim Track  (v3.6)
 # ==============================================================
 # Features:
-#   ✅ Auditor specialization by claim type (Medical, Travel, LTC, All)
-#   ✅ Awaiting Budget stage (Auditor/AAO/SAO)
-#   ✅ Enhanced Dashboard with auto-refresh visuals
-#   ✅ Fixed Login/Signup duplicate ID issue
-#   ✅ Admin password reset + user deactivation
-#   ✅ Compatible with Neon PostgreSQL or local SQLite
+#   ✅ Multi-specialization for Auditors (Medical, Travel, LTC, Other)
+#   ✅ Role-based menus (Claimants vs Officials)
+#   ✅ Awaiting Budget stage
+#   ✅ Dashboard with auto-visuals
+#   ✅ Admin password reset, user deactivate
 # ==============================================================
 
-import os, random, string, time
+import os, time, random, string
 from datetime import datetime
 import pandas as pd
 import plotly.express as px
@@ -38,7 +37,7 @@ class User(Base):
     email = Column(String, index=True)
     password_hash = Column(String)
     role = Column(String)
-    specialization = Column(String, default="All")  # Auditor specialization
+    specialization = Column(String, default="All")  # Multi-select specializations
     location = Column(String)
     phone = Column(String)
     official_id = Column(String)
@@ -74,26 +73,26 @@ class WorkflowLog(Base):
     acted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     timestamp = Column(DateTime, default=func.now())
 
-Base.metadata.create_all(engine)
+# ---------------- DATABASE INITIALIZATION -----------------
+try:
+    # Base.metadata.drop_all(engine)   # Uncomment ONCE if schema mismatch occurs
+    Base.metadata.create_all(engine)
+except Exception as e:
+    print("⚠️ Database initialization error:", e)
 
-# ---------------- HELPERS -----------------
 def get_db(): return SessionLocal()
-
 def make_uid():
     return "CT-" + datetime.now().strftime("%Y%m%d") + "-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
-
 def has_role(user_roles, role):
     if not user_roles: return False
     roles = [r.strip() for r in user_roles.split(",")]
     return role in roles or "Admin" in roles
-
 def get_next_role(role):
     try:
         idx = WORKFLOW_CHAIN.index(role)
         return WORKFLOW_CHAIN[idx + 1] if idx + 1 < len(WORKFLOW_CHAIN) else None
     except ValueError:
         return None
-
 def get_prev_role(role):
     try:
         idx = WORKFLOW_CHAIN.index(role)
@@ -102,15 +101,19 @@ def get_prev_role(role):
         return None
 
 def find_specialized_officer(db, location, claim_type):
-    """Find best auditor match based on specialization."""
-    officer = db.query(User).filter(User.role.like("%Auditor%"), User.location == location,
-                                    User.specialization == claim_type, User.active == True).first()
-    if officer: return officer
-    officer = db.query(User).filter(User.role.like("%Auditor%"), User.location == location,
-                                    User.specialization == "All", User.active == True).first()
-    if officer: return officer
-    return db.query(User).filter(User.role.like("%Auditor%"), User.location == location,
-                                 User.active == True).first()
+    """Find auditor whose specialization list includes the claim type."""
+    auditors = db.query(User).filter(
+        User.role.like("%Auditor%"),
+        User.location == location,
+        User.active == True
+    ).all()
+    for officer in auditors:
+        if officer.specialization == "All":
+            return officer
+        specs = [s.strip().lower() for s in officer.specialization.split(",")]
+        if claim_type.lower() in specs:
+            return officer
+    return auditors[0] if auditors else None
 
 # ---------------- STREAMLIT CONFIG -----------------
 st.set_page_config(page_title="DGACE-ESD Claim Track", layout="wide")
@@ -139,11 +142,10 @@ def login():
         user = db.query(User).filter(User.email == email, User.active == True).first()
         if user and check_password_hash(user.password_hash, pwd):
             st.session_state["user"] = {"id": user.id, "name": user.name,
-                "email": user.email, "role": user.role, "location": user.location,
-                "is_admin": user.is_admin}
+                "email": user.email, "role": user.role,
+                "location": user.location, "is_admin": user.is_admin}
             st.success("✅ Login successful! Redirecting...")
-            time.sleep(1)
-            st.rerun()
+            time.sleep(1); st.rerun()
         else:
             st.error("Invalid credentials")
         db.close()
@@ -176,14 +178,9 @@ db = get_db()
 user = db.query(User).get(st.session_state["user"]["id"])
 
 # ---------------- SIDEBAR -----------------
-# ---------------- SIDEBAR -----------------
-menu = []
-
-# Role-based menu visibility
 if user.role == "Claimant":
     menu = ["Submit Claim", "My Claims"]
 else:
-    # Officials created by admin
     menu = ["Pending With Me", "My Claims"]
     if has_role(user.role, "Director") or has_role(user.role, "DG"):
         menu.append("Dashboard")
@@ -210,9 +207,17 @@ if choice == "Admin":
     pwd = st.text_input("Password", type="password", key="admin_pwd")
     role = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant"], key="admin_role")
     loc = st.selectbox("Location", ["New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="admin_loc")
-    spec = "All"
+
     if role == "Auditor":
-        spec = st.selectbox("Specialization", ["All","Medical","Travel","LTC"], key="admin_spec")
+        spec_list = st.multiselect(
+            "Specialization (select multiple)",
+            ["Medical", "Travel", "LTC", "Other"],
+            default=["Medical"], key="admin_spec_multi"
+        )
+        spec = ",".join(spec_list) if spec_list else "All"
+    else:
+        spec = "All"
+
     phone = st.text_input("Phone", key="admin_phone")
     if st.button("Add/Update User", key="admin_add"):
         existing = db.query(User).filter(User.email == email).first()
@@ -225,7 +230,6 @@ if choice == "Admin":
                 role=role, specialization=spec,
                 location=loc, phone=phone))
             db.commit(); st.success("User added successfully")
-
     st.markdown("---")
     st.subheader("Reset Password")
     reset_email = st.text_input("Email to reset", key="reset_email")
@@ -250,8 +254,6 @@ if choice == "Admin":
     st.dataframe(pd.read_sql(db.query(User).statement, db.bind)[["id","name","email","role","specialization","location","active"]])
     db.close(); st.stop()
 
-# ---------------- (Other functions remain unchanged: Submit Claim, My Claims, Pending, Dashboard) -----------------
-# The rest of the code continues from your v3.3 version, identical except for specialization routing.
 # ---------------- SUBMIT CLAIM -----------------
 if choice == "Submit Claim":
     st.header("Submit New Claim")
@@ -272,13 +274,10 @@ if choice == "Submit Claim":
                     amount=amt, date_of_bill=str(dob), remarks=remarks,
                     location=user.location, status="Pending", current_stage="Diarist"
                 )
-
-                # Attempt automatic Auditor assignment
                 officer = find_specialized_officer(db, user.location, ctype)
                 if officer:
                     claim.assigned_to = officer.id
                     claim.current_stage = "Auditor"
-
                 db.add(claim); db.commit()
                 db.add(WorkflowLog(
                     claim_id=claim.id, stage="Employee",
@@ -295,7 +294,6 @@ if choice == "My Claims":
     claims = db.query(Claim).filter(
         Claim.submitter_id == user.id, Claim.archived == False
     ).order_by(Claim.created_at.desc()).all()
-
     if not claims:
         st.info("No claims found.")
     else:
@@ -304,16 +302,11 @@ if choice == "My Claims":
             assigned = db.query(User).get(c.assigned_to).name if c.assigned_to else "Unassigned"
             st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | "
                         f"**Stage:** {c.current_stage} | **Status:** {status} | **Assigned:** {assigned}")
-
-            logs = db.query(WorkflowLog).filter(
-                WorkflowLog.claim_id == c.id
-            ).order_by(WorkflowLog.timestamp).all()
-
+            logs = db.query(WorkflowLog).filter(WorkflowLog.claim_id == c.id).order_by(WorkflowLog.timestamp).all()
             if logs:
                 df = pd.DataFrame([
                     {
-                        "Stage": L.stage, "Action": L.action,
-                        "Remarks": L.remarks,
+                        "Stage": L.stage, "Action": L.action, "Remarks": L.remarks,
                         "By": db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else "System",
                         "Time": L.timestamp
                     } for L in logs
@@ -325,33 +318,25 @@ if choice == "My Claims":
 if choice == "Pending With Me":
     st.header("Claims Pending With Me")
     roles = [r.strip() for r in (user.role or "").split(",")]
-
     for role_item in roles:
         if role_item not in WORKFLOW_CHAIN:
             continue
         st.subheader(f"As {role_item} — Location: {user.location}")
-
         q = db.query(Claim).filter(Claim.archived == False)
         q_stage = q.filter(Claim.current_stage == role_item)
         awaiting_q = q.filter(Claim.current_stage == "Awaiting Budget")
-
-        # Restrict by location
         if not has_role(user.role, "DG") and not user.is_admin:
             q_stage = q_stage.filter(Claim.location == user.location)
             awaiting_q = awaiting_q.filter(Claim.location == user.location)
-
-        # Auditor specialization filtering
         if role_item == "Auditor":
             rows_stage = q_stage.filter(
                 (Claim.assigned_to == user.id) | (Claim.assigned_to == None)
             ).order_by(Claim.created_at).all()
             if user.specialization != "All":
-                rows_stage = [c for c in rows_stage if
-                              (c.assigned_to == user.id) or (c.claim_type == user.specialization)]
+                specs = [s.strip().lower() for s in user.specialization.split(",")]
+                rows_stage = [c for c in rows_stage if (c.assigned_to == user.id) or (c.claim_type.lower() in specs)]
         else:
             rows_stage = q_stage.order_by(Claim.created_at).all()
-
-        # Awaiting budget visibility
         rows_awaiting = []
         if has_role(user.role, "DG") or user.is_admin or role_item in AWAITING_ROLES:
             rows_awaiting = awaiting_q.order_by(Claim.created_at).all()
@@ -359,9 +344,8 @@ if choice == "Pending With Me":
                 rows_awaiting = [
                     c for c in rows_awaiting
                     if (c.assigned_to == user.id)
-                    or (c.assigned_to is None and (user.specialization == "All" or c.claim_type == user.specialization))
+                    or (c.assigned_to is None and (user.specialization == "All" or c.claim_type.lower() in specs))
                 ]
-
         rows = rows_stage + rows_awaiting
         if not rows:
             st.info("No pending items.")
@@ -369,9 +353,7 @@ if choice == "Pending With Me":
             for c in rows:
                 submitter = db.query(User).get(c.submitter_id)
                 submitter_name = submitter.name if submitter else "Deleted user"
-                st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | "
-                            f"**Amount:** ₹{c.amount} | **Stage:** {c.current_stage}")
-
+                st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | **Stage:** {c.current_stage}")
                 with st.form(f"form_{c.id}"):
                     action_opts = ["Forward for approval", "Send back for review"]
                     if role_item in ["Director"] or has_role(user.role, "DG"):
@@ -380,10 +362,8 @@ if choice == "Pending With Me":
                         action_opts.append("Mark Awaiting Budget")
                     if c.current_stage == "Awaiting Budget" and role_item in AWAITING_ROLES:
                         action_opts.append("Unpark and Forward")
-
                     action = st.selectbox("Action", action_opts, key=f"actsel_{c.id}")
                     remarks = st.text_area("Remarks (required)", key=f"actrem_{c.id}")
-
                     assign_to_option = None
                     if action == "Forward for approval" and get_next_role(role_item) == "Auditor":
                         auditors = db.query(User).filter(
@@ -394,7 +374,6 @@ if choice == "Pending With Me":
                         options = [f"{a.id} – {a.name} ({a.specialization})" for a in auditors]
                         assign_choice = st.selectbox("Assign to Auditor", options, key=f"assign_{c.id}")
                         assign_to_option = int(assign_choice.split(" – ")[0]) if assign_choice else None
-
                     submit = st.form_submit_button("Confirm Action", key=f"confirm_{c.id}")
                     if submit:
                         if not remarks.strip():
@@ -445,7 +424,6 @@ if choice == "Dashboard":
     if not (has_role(user.role, "Director") or has_role(user.role, "DG")):
         st.error("Dashboard restricted."); st.stop()
     st.header("Dashboard")
-
     cols = st.columns(4)
     with cols[0]:
         loc = st.selectbox("Location", ["All","New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="dash_loc")
@@ -455,12 +433,10 @@ if choice == "Dashboard":
         stage = st.selectbox("Stage", ["All"] + WORKFLOW_CHAIN + ["Awaiting Budget","Returned","Approved"], key="dash_stage")
     with cols[3]:
         min_days = st.number_input("Minimum Days Pending", min_value=0, value=0, key="dash_mindays")
-
     q = db.query(Claim).filter(Claim.archived == False)
     if loc != "All": q = q.filter(Claim.location == loc)
     if ctype != "All": q = q.filter(Claim.claim_type == ctype)
     if stage != "All": q = q.filter(Claim.current_stage == stage)
-
     claims = q.all()
     data = []
     for c in claims:
@@ -472,7 +448,6 @@ if choice == "Dashboard":
                 "Stage": c.current_stage, "Status": c.status,
                 "Location": c.location, "Days": days, "Assigned": assigned
             })
-
     if not data:
         st.info("No matching claims found.")
     else:
@@ -494,7 +469,6 @@ if choice == "Dashboard":
             st.plotly_chart(px.bar(df, x="Stage", color="flag", title="Claims by Stage (🟠 Awaiting Budget Highlighted)"))
             st.plotly_chart(px.pie(df, names="Type", title="Claims by Type"))
             st.plotly_chart(px.bar(df, x="Location", y="Amount", title="Total Amount by Location"))
-
     db.close(); st.stop()
 
-st.caption("DGACE-ESD Claim Track v3.4 – Auditor specialization + Awaiting Budget + Dashboard Enhancements")
+st.caption("DGACE-ESD Claim Track v3.6 – Multi-specialization + Role Segregation + Dashboard Enhancements")
