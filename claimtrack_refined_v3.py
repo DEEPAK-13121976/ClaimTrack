@@ -251,7 +251,97 @@ if choice == "Admin":
             if f"{u.name} ({u.email}) – {u.role} – {u.specialization}" == sel:
                 u.active = False; db.commit(); st.success("User deactivated.")
     st.markdown("---")
-    st.dataframe(pd.read_sql(db.query(User).statement, db.bind)[["id","name","email","role","specialization","location","active"]])
+# ---------------- ADMIN PANEL -----------------
+if choice == "Admin":
+    if not user.is_admin:
+        st.error("Admin only"); st.stop()
+    st.header("Admin Panel")
+    st.subheader("Create/Assign Roles")
+
+    name = st.text_input("Name", key="admin_name")
+    email = st.text_input("Email", key="admin_email")
+    pwd = st.text_input("Password", type="password", key="admin_pwd")
+    role = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant"], key="admin_role")
+    loc = st.selectbox("Location", ["New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="admin_loc")
+
+    if role == "Auditor":
+        spec_list = st.multiselect(
+            "Specialization (select multiple)",
+            ["Medical", "Travel", "LTC", "Other"],
+            default=["Medical"], key="admin_spec_multi"
+        )
+        spec = ",".join(spec_list) if spec_list else "All"
+    else:
+        spec = "All"
+
+    phone = st.text_input("Phone", key="admin_phone")
+    if st.button("Add/Update User", key="admin_add"):
+        existing = db.query(User).filter(User.email == email).first()
+        if existing:
+            existing.role, existing.specialization, existing.location, existing.phone = role, spec, loc, phone
+            db.commit(); st.success("User updated successfully")
+        else:
+            db.add(User(name=name or email, email=email,
+                        password_hash=generate_password_hash(pwd),
+                        role=role, specialization=spec,
+                        location=loc, phone=phone))
+            db.commit(); st.success("User added successfully")
+
+    st.markdown("---")
+    st.subheader("Reset Password")
+    reset_email = st.text_input("Email to reset", key="reset_email")
+    new_pwd = st.text_input("New password", type="password", key="reset_pwd")
+    if st.button("Reset Password", key="reset_btn"):
+        target = db.query(User).filter(User.email == reset_email).first()
+        if target:
+            target.password_hash = generate_password_hash(new_pwd)
+            db.commit(); st.success("Password reset successfully")
+        else:
+            st.error("User not found")
+
+    st.markdown("---")
+    st.subheader("Deactivate User")
+    active_users = db.query(User).filter(User.active == True, User.is_admin == False).all()
+    sel = st.selectbox("Select user", [f"{u.name} ({u.email}) – {u.role} – {u.specialization}" for u in active_users])
+    if st.button("Deactivate", key="deactivate_btn"):
+        for u in active_users:
+            if f"{u.name} ({u.email}) – {u.role} – {u.specialization}" == sel:
+                u.active = False; db.commit(); st.success("User deactivated.")
+
+    st.markdown("---")
+    st.subheader("📤 Data Export (Admin Only)")
+    st.info("Export full claims data for audit or reporting.")
+
+    claims_df = pd.read_sql(db.query(Claim).statement, db.bind)
+    users_df = pd.read_sql(db.query(User).statement, db.bind)
+    logs_df = pd.read_sql(db.query(WorkflowLog).statement, db.bind)
+
+    with st.expander("Preview Claims Data"):
+        st.dataframe(claims_df.head(10))
+
+    import io
+    csv_buffer = io.StringIO()
+    claims_df.to_csv(csv_buffer, index=False)
+    st.download_button(
+        label="⬇️ Download Claims as CSV",
+        data=csv_buffer.getvalue(),
+        file_name=f"claims_export_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
+
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+        claims_df.to_excel(writer, index=False, sheet_name='Claims')
+        users_df.to_excel(writer, index=False, sheet_name='Users')
+        logs_df.to_excel(writer, index=False, sheet_name='WorkflowLogs')
+    st.download_button(
+        label="📘 Download Full Dataset (Excel)",
+        data=excel_buffer,
+        file_name=f"claimtrack_full_export_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.success("✅ Export available for Admin only.")
     db.close(); st.stop()
 
 # ---------------- SUBMIT CLAIM -----------------
