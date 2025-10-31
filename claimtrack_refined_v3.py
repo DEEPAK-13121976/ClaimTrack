@@ -202,10 +202,10 @@ if choice == "Admin":
         st.error("Admin only"); st.stop()
     st.header("Admin Panel")
     st.subheader("Create/Assign Roles")
-    name = st.text_input("Name", key="admin_name")
-    email = st.text_input("Email", key="admin_email")
+    name = st.text_input("Name", key="admin_name_v37")
+    email = st.text_input("Email", key="admin_email_v37")
     pwd = st.text_input("Password", type="password", key="admin_pwd")
-    role = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant"], key="admin_role")
+    role = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant"], key="admin_role_v37")
     loc = st.selectbox("Location", ["New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="admin_loc")
 
     if role == "Auditor":
@@ -258,10 +258,10 @@ if choice == "Admin":
     st.header("Admin Panel")
     st.subheader("Create/Assign Roles")
 
-    name = st.text_input("Name", key="admin_name")
-    email = st.text_input("Email", key="admin_email")
+    name = st.text_input("Name", key="admin_name_v37")
+    email = st.text_input("Email", key="admin_email_v37")
     pwd = st.text_input("Password", type="password", key="admin_pwd")
-    role = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant"], key="admin_role")
+    role = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant"], key="admin_role_v37")
     loc = st.selectbox("Location", ["New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="admin_loc")
 
     if role == "Auditor":
