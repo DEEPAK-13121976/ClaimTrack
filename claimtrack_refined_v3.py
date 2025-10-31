@@ -1,564 +1,247 @@
-# ==============================================================
-# DGACE-ESD Claim Track  (v3.6)
-# ==============================================================
-# Features:
-#   ✅ Multi-specialization for Auditors (Medical, Travel, LTC, Other)
-#   ✅ Role-based menus (Claimants vs Officials)
-#   ✅ Awaiting Budget stage
-#   ✅ Dashboard with auto-visuals
-#   ✅ Admin password reset, user deactivate
-# ==============================================================
-
-import os, time, random, string
-from datetime import datetime
-import pandas as pd
-import plotly.express as px
 import streamlit as st
-from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, ForeignKey, func
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+import sqlite3
+import pandas as pd
+from datetime import datetime
+import plotly.express as px
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# ---------------- CONFIG -----------------
-DEFAULT_SQLITE = "sqlite:///data/claims_refined_v3.db"
-DB_URL = os.environ.get("DATABASE_URL", DEFAULT_SQLITE)
-os.makedirs("data", exist_ok=True)
-engine = create_engine(DB_URL, echo=False, future=True)
-SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
+# -----------------------------
+# DB SETUP
+# -----------------------------
+conn = sqlite3.connect("claims.db", check_same_thread=False)
+c = conn.cursor()
 
-WORKFLOW_CHAIN = ["Diarist", "Auditor", "AAO", "SAO", "Director", "DDO"]
-AWAITING_ROLES = ["Auditor", "AAO", "SAO"]
+c.execute('''CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    email TEXT UNIQUE,
+    password TEXT,
+    role TEXT,
+    location TEXT
+)''')
 
-# ---------------- MODELS -----------------
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    name = Column(String)
-    email = Column(String, index=True)
-    password_hash = Column(String)
-    role = Column(String)
-    specialization = Column(String, default="All")  # Multi-select specializations
-    location = Column(String)
-    phone = Column(String)
-    official_id = Column(String)
-    is_admin = Column(Boolean, default=False)
-    active = Column(Boolean, default=True)
+c.execute('''CREATE TABLE IF NOT EXISTS claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    type TEXT,
+    bill_no TEXT,
+    amount REAL,
+    bill_date TEXT,
+    remarks TEXT,
+    status TEXT,
+    current_role TEXT,
+    location TEXT,
+    created_at TEXT
+)''')
 
-class Claim(Base):
-    __tablename__ = "claims"
-    id = Column(Integer, primary_key=True)
-    uid = Column(String, unique=True, index=True)
-    submitter_id = Column(Integer, ForeignKey("users.id"))
-    submitter = relationship("User", foreign_keys=[submitter_id])
-    claim_type = Column(String)
-    amount = Column(Float)
-    date_of_bill = Column(String)
-    remarks = Column(Text)
-    created_at = Column(DateTime, default=func.now())
-    status = Column(String, default="Pending")
-    current_stage = Column(String, default="Diarist")
-    location = Column(String)
-    archived = Column(Boolean, default=False)
-    assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
-    assigned_user = relationship("User", foreign_keys=[assigned_to])
+c.execute('''CREATE TABLE IF NOT EXISTS workflow (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id INTEGER,
+    role TEXT,
+    action TEXT,
+    remarks TEXT,
+    timestamp TEXT
+)''')
 
-class WorkflowLog(Base):
-    __tablename__ = "workflow_logs"
-    id = Column(Integer, primary_key=True)
-    claim_id = Column(Integer, ForeignKey("claims.id"), nullable=True)
-    claim = relationship("Claim", foreign_keys=[claim_id])
-    stage = Column(String)
-    action = Column(String)
-    remarks = Column(Text)
-    acted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    timestamp = Column(DateTime, default=func.now())
+conn.commit()
 
-# ---------------- DATABASE INITIALIZATION -----------------
-try:
-    # Base.metadata.drop_all(engine)   # Uncomment ONCE if schema mismatch occurs
-    Base.metadata.create_all(engine)
-except Exception as e:
-    print("⚠️ Database initialization error:", e)
+# -----------------------------
+# HELPERS
+# -----------------------------
+def get_user(email):
+    c.execute("SELECT * FROM users WHERE email=?", (email,))
+    return c.fetchone()
 
-def get_db(): return SessionLocal()
-def make_uid():
-    return "CT-" + datetime.now().strftime("%Y%m%d") + "-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
-def has_role(user_roles, role):
-    if not user_roles: return False
-    roles = [r.strip() for r in user_roles.split(",")]
-    return role in roles or "Admin" in roles
-def get_next_role(role):
-    try:
-        idx = WORKFLOW_CHAIN.index(role)
-        return WORKFLOW_CHAIN[idx + 1] if idx + 1 < len(WORKFLOW_CHAIN) else None
-    except ValueError:
-        return None
-def get_prev_role(role):
-    try:
-        idx = WORKFLOW_CHAIN.index(role)
-        return WORKFLOW_CHAIN[idx - 1] if idx - 1 >= 0 else None
-    except ValueError:
-        return None
+def get_pending_claims(role, location):
+    if role in ["Director", "DDO", "DG"]:
+        c.execute("SELECT * FROM claims WHERE current_role=? AND status!='Completed'", (role,))
+    else:
+        c.execute("SELECT * FROM claims WHERE current_role=? AND location=? AND status!='Completed'", (role, location))
+    return c.fetchall()
 
-def find_specialized_officer(db, location, claim_type):
-    """Find auditor whose specialization list includes the claim type."""
-    auditors = db.query(User).filter(
-        User.role.like("%Auditor%"),
-        User.location == location,
-        User.active == True
-    ).all()
-    for officer in auditors:
-        if officer.specialization == "All":
-            return officer
-        specs = [s.strip().lower() for s in officer.specialization.split(",")]
-        if claim_type.lower() in specs:
-            return officer
-    return auditors[0] if auditors else None
+def submit_claim(user_id, claim_type, bill_no, amount, bill_date, remarks, location):
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute(
+        "INSERT INTO claims (user_id,type,bill_no,amount,bill_date,remarks,status,current_role,location,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (user_id, claim_type, bill_no, amount, bill_date, remarks, "Pending", "Diarist", location, created_at)
+    )
+    conn.commit()
+    st.success("✅ Claim submitted successfully!")
 
-# ---------------- STREAMLIT CONFIG -----------------
-st.set_page_config(page_title="DGACE-ESD Claim Track", layout="wide")
-st.title("DGACE-ESD Claim Track")
+def process_claim(claim_id, action, remarks, next_role=None):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT INTO workflow (claim_id,role,action,remarks,timestamp) VALUES (?,?,?,?,?)",
+              (st.session_state['user']['role'], st.session_state['user']['role'], action, remarks, timestamp))
+    if action == "Approved" and not next_role:
+        c.execute("UPDATE claims SET status='Completed',current_role=NULL WHERE id=?", (claim_id,))
+    elif action == "Returned":
+        c.execute("UPDATE claims SET current_role='Claimant',status='Returned' WHERE id=?", (claim_id,))
+    elif action == "Awaiting Budget":
+        c.execute("UPDATE claims SET status='Awaiting Budget' WHERE id=?", (claim_id,))
+    elif action == "Forwarded":
+        c.execute("UPDATE claims SET current_role=?,status='In Progress' WHERE id=?", (next_role, claim_id))
+    conn.commit()
+    st.success(f"✅ Claim {action} successfully!")
 
-if "user" not in st.session_state:
-    st.session_state["user"] = None
-
-# Seed admin
-db = get_db()
-if not db.query(User).filter(User.email == "admin@org.in").first():
-    db.add(User(name="Admin", email="admin@org.in",
-                password_hash=generate_password_hash("admin123"),
-                role="Admin", location="New Delhi",
-                specialization="All", is_admin=True))
-    db.commit()
-db.close()
-
-# ---------------- LOGIN/SIGNUP -----------------
-def login():
-    st.subheader("Login")
-    email = st.text_input("Email", key="login_email")
-    pwd = st.text_input("Password", type="password", key="login_pwd")
-    if st.button("Login", key="login_btn"):
-        db = get_db()
-        user = db.query(User).filter(User.email == email, User.active == True).first()
-        if user and check_password_hash(user.password_hash, pwd):
-            st.session_state["user"] = {"id": user.id, "name": user.name,
-                "email": user.email, "role": user.role,
-                "location": user.location, "is_admin": user.is_admin}
-            st.success("✅ Login successful! Redirecting...")
-            time.sleep(1); st.rerun()
-        else:
-            st.error("Invalid credentials")
-        db.close()
-
-def signup():
-    st.subheader("Claimant Sign-Up")
-    name = st.text_input("Full name", key="signup_name")
-    email = st.text_input("Email", key="signup_email")
-    pwd = st.text_input("Password", type="password", key="signup_pwd")
-    loc = st.selectbox("Location", ["New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="signup_loc")
-    if st.button("Sign Up", key="signup_btn"):
-        db = get_db()
-        if db.query(User).filter(User.email == email).first():
-            st.error("Email already exists")
-        else:
-            db.add(User(name=name, email=email,
-                password_hash=generate_password_hash(pwd),
-                role="Claimant", location=loc))
-            db.commit()
-            st.success("Account created successfully!")
-        db.close()
-
-if not st.session_state["user"]:
-    col1, col2 = st.columns(2)
-    with col1: login()
-    with col2: signup()
-    st.stop()
-
-db = get_db()
-user = db.query(User).get(st.session_state["user"]["id"])
-
-# ---------------- SIDEBAR -----------------
-if user.role == "Claimant":
-    menu = ["Submit Claim", "My Claims"]
-else:
-    menu = ["Pending With Me", "My Claims"]
-    if has_role(user.role, "Director") or has_role(user.role, "DG"):
-        menu.append("Dashboard")
-    if user.is_admin:
-        menu.append("Admin")
-
-choice = st.sidebar.selectbox("Menu", menu)
-st.sidebar.info(f"{user.name} ({user.role}) – {user.location}")
-
-if st.sidebar.button("Logout", key="logout_btn"):
+def logout():
     st.session_state.clear()
     st.success("✅ Successfully logged out!")
-    time.sleep(1)
-    st.rerun()
 
-# ---------------- ADMIN PANEL -----------------
-if choice == "Admin":
-    if not user.is_admin:
-        st.error("Admin only"); st.stop()
-    st.header("Admin Panel")
-    st.subheader("Create/Assign Roles")
-    name = st.text_input("Name", key="admin_name_v37")
-    email = st.text_input("Email", key="admin_email_v37")
-    pwd = st.text_input("Password", type="password", key="admin_pwd")
-    role = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant"], key="admin_role_v37")
-    loc = st.selectbox("Location", ["New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="admin_loc")
-
-    if role == "Auditor":
-        spec_list = st.multiselect(
-            "Specialization (select multiple)",
-            ["Medical", "Travel", "LTC", "Other"],
-            default=["Medical"], key="admin_spec_multi"
-        )
-        spec = ",".join(spec_list) if spec_list else "All"
-    else:
-        spec = "All"
-
-    phone = st.text_input("Phone", key="admin_phone")
-    if st.button("Add/Update User", key="admin_add"):
-        existing = db.query(User).filter(User.email == email).first()
-        if existing:
-            existing.role, existing.specialization, existing.location, existing.phone = role, spec, loc, phone
-            db.commit(); st.success("User updated successfully")
+# -----------------------------
+# LOGIN / SIGNUP
+# -----------------------------
+if "user" not in st.session_state:
+    st.title("DGACE-ESD ClaimTrack")
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        user = get_user(email)
+        if user and check_password_hash(user[3], password):
+            st.session_state["user"] = {
+                "id": user[0],
+                "name": user[1],
+                "email": user[2],
+                "role": user[4],
+                "location": user[5]
+            }
+            st.rerun()
         else:
-            db.add(User(name=name or email, email=email,
-                password_hash=generate_password_hash(pwd),
-                role=role, specialization=spec,
-                location=loc, phone=phone))
-            db.commit(); st.success("User added successfully")
-    st.markdown("---")
-    st.subheader("Reset Password")
-    reset_email = st.text_input("Email to reset", key="reset_email")
-    new_pwd = st.text_input("New password", type="password", key="reset_pwd")
-    if st.button("Reset Password", key="reset_btn"):
-        target = db.query(User).filter(User.email == reset_email).first()
-        if target:
-            target.password_hash = generate_password_hash(new_pwd)
-            db.commit(); st.success("Password reset successfully")
-        else:
-            st.error("User not found")
+            st.error("Invalid credentials. Try again or contact admin.")
+    st.stop()
 
-    st.markdown("---")
-    st.subheader("Deactivate User")
-    active_users = db.query(User).filter(User.active == True, User.is_admin == False).all()
-    sel = st.selectbox("Select user", [f"{u.name} ({u.email}) – {u.role} – {u.specialization}" for u in active_users])
-    if st.button("Deactivate", key="deactivate_btn"):
-        for u in active_users:
-            if f"{u.name} ({u.email}) – {u.role} – {u.specialization}" == sel:
-                u.active = False; db.commit(); st.success("User deactivated.")
-    st.markdown("---")
-# ---------------- ADMIN PANEL -----------------
-if choice == "Admin":
-    if not user.is_admin:
-        st.error("Admin only"); st.stop()
-    st.header("Admin Panel")
-    st.subheader("Create/Assign Roles")
+# -----------------------------
+# MAIN APP
+# -----------------------------
+user = st.session_state["user"]
+role = user["role"]
+location = user["location"]
 
-    name = st.text_input("Name", key="admin_name_v37")
-    email = st.text_input("Email", key="admin_email_v37")
-    pwd = st.text_input("Password", type="password", key="admin_pwd")
-    role = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant"], key="admin_role_v37")
-    loc = st.selectbox("Location", ["New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="admin_loc")
+st.sidebar.header(f"Welcome, {user['name']} ({role})")
+st.sidebar.write(f"📍 {location}")
 
-    if role == "Auditor":
-        spec_list = st.multiselect(
-            "Specialization (select multiple)",
-            ["Medical", "Travel", "LTC", "Other"],
-            default=["Medical"], key="admin_spec_multi"
-        )
-        spec = ",".join(spec_list) if spec_list else "All"
-    else:
-        spec = "All"
+# Menu visibility based on role
+if role == "Claimant":
+    menu = ["Submit Claim", "My Claims", "Logout"]
+elif role in ["Diarist", "Auditor", "AAO", "SAO", "Director", "DDO"]:
+    menu = ["Pending with Me", "Processed by Me", "Logout"]
+elif role == "Admin":
+    menu = ["Manage Users", "Export Data", "Logout"]
+elif role == "DG":
+    menu = ["Dashboard", "Logout"]
+else:
+    menu = ["Logout"]
 
-    phone = st.text_input("Phone", key="admin_phone")
-    if st.button("Add/Update User", key="admin_add"):
-        existing = db.query(User).filter(User.email == email).first()
-        if existing:
-            existing.role, existing.specialization, existing.location, existing.phone = role, spec, loc, phone
-            db.commit(); st.success("User updated successfully")
-        else:
-            db.add(User(name=name or email, email=email,
-                        password_hash=generate_password_hash(pwd),
-                        role=role, specialization=spec,
-                        location=loc, phone=phone))
-            db.commit(); st.success("User added successfully")
+choice = st.sidebar.selectbox("Navigate", menu)
 
-    st.markdown("---")
-    st.subheader("Reset Password")
-    reset_email = st.text_input("Email to reset", key="reset_email")
-    new_pwd = st.text_input("New password", type="password", key="reset_pwd")
-    if st.button("Reset Password", key="reset_btn"):
-        target = db.query(User).filter(User.email == reset_email).first()
-        if target:
-            target.password_hash = generate_password_hash(new_pwd)
-            db.commit(); st.success("Password reset successfully")
-        else:
-            st.error("User not found")
+# -----------------------------
+# CLAIMANT SECTION
+# -----------------------------
+if role == "Claimant" and choice == "Submit Claim":
+    st.header("🧾 Submit New Claim")
 
-    st.markdown("---")
-    st.subheader("Deactivate User")
-    active_users = db.query(User).filter(User.active == True, User.is_admin == False).all()
-    sel = st.selectbox("Select user", [f"{u.name} ({u.email}) – {u.role} – {u.specialization}" for u in active_users])
-    if st.button("Deactivate", key="deactivate_btn"):
-        for u in active_users:
-            if f"{u.name} ({u.email}) – {u.role} – {u.specialization}" == sel:
-                u.active = False; db.commit(); st.success("User deactivated.")
+    claim_type = st.selectbox("Claim Type", ["Medical", "Travel", "LTC"], key="claim_type_new")
+    bill_no = st.text_input("Bill Number", key="claim_bill_no_new")
+    amount = st.number_input("Amount (₹)", min_value=0.0, key="claim_amount_new")
+    bill_date = st.date_input("Bill Date", key="claim_date_new")
+    remarks = st.text_area("Remarks (optional)", key="claim_remarks_new")
 
-    st.markdown("---")
-    st.subheader("📤 Data Export (Admin Only)")
-    st.info("Export full claims data for audit or reporting.")
+    if st.button("Submit Claim", key="claim_submit_new"):
+        submit_claim(user["id"], claim_type, bill_no, amount, str(bill_date), remarks, location)
 
-    claims_df = pd.read_sql(db.query(Claim).statement, db.bind)
-    users_df = pd.read_sql(db.query(User).statement, db.bind)
-    logs_df = pd.read_sql(db.query(WorkflowLog).statement, db.bind)
+elif role == "Claimant" and choice == "My Claims":
+    st.header("📜 My Claims")
+    c.execute("SELECT id,type,bill_no,amount,status,current_role,created_at FROM claims WHERE user_id=?", (user["id"],))
+    df = pd.DataFrame(c.fetchall(), columns=["ID","Type","Bill No","Amount","Status","Current Role","Created At"])
+    st.dataframe(df if not df.empty else pd.DataFrame())
 
-    with st.expander("Preview Claims Data"):
-        st.dataframe(claims_df.head(10))
-
-    import io
-    csv_buffer = io.StringIO()
-    claims_df.to_csv(csv_buffer, index=False)
-    st.download_button(
-        label="⬇️ Download Claims as CSV",
-        data=csv_buffer.getvalue(),
-        file_name=f"claims_export_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv"
-    )
-
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-        claims_df.to_excel(writer, index=False, sheet_name='Claims')
-        users_df.to_excel(writer, index=False, sheet_name='Users')
-        logs_df.to_excel(writer, index=False, sheet_name='WorkflowLogs')
-    st.download_button(
-        label="📘 Download Full Dataset (Excel)",
-        data=excel_buffer,
-        file_name=f"claimtrack_full_export_{datetime.now().strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    st.success("✅ Export available for Admin only.")
-    db.close(); st.stop()
-
-# ---------------- SUBMIT CLAIM -----------------
-if choice == "Submit Claim":
-    st.header("Submit New Claim")
-    with st.form("new_claim"):
-        ctype = st.selectbox("Claim Type", ["Medical", "Travel", "LTC", "Other"], key="submit_type")
-        amt = st.number_input("Amount (₹)", min_value=0.0, key="submit_amt")
-        dob = st.date_input("Bill Date", key="submit_dob")
-        remarks = st.text_area("Remarks (optional)", key="submit_remarks")
-        submit = st.form_submit_button("Submit Claim", key="submit_claim_btn")
-
-        if submit:
-            if amt <= 0:
-                st.error("Please enter a valid amount")
-            else:
-                uid = make_uid()
-                claim = Claim(
-                    uid=uid, submitter_id=user.id, claim_type=ctype,
-                    amount=amt, date_of_bill=str(dob), remarks=remarks,
-                    location=user.location, status="Pending", current_stage="Diarist"
-                )
-                officer = find_specialized_officer(db, user.location, ctype)
-                if officer:
-                    claim.assigned_to = officer.id
-                    claim.current_stage = "Auditor"
-                db.add(claim); db.commit()
-                db.add(WorkflowLog(
-                    claim_id=claim.id, stage="Employee",
-                    action="Submitted", remarks="Initial submission", acted_by=user.id
-                ))
-                db.commit()
-                st.success(f"Claim {uid} submitted successfully "
-                           f"and routed to Auditor: {officer.name if officer else 'Auto assignment pending'}")
-    db.close(); st.stop()
-
-# ---------------- MY CLAIMS -----------------
-if choice == "My Claims":
-    st.header("My Claims Overview")
-    claims = db.query(Claim).filter(
-        Claim.submitter_id == user.id, Claim.archived == False
-    ).order_by(Claim.created_at.desc()).all()
+# -----------------------------
+# OFFICIALS SECTION
+# -----------------------------
+elif role in ["Diarist","Auditor","AAO","SAO","Director","DDO"] and choice == "Pending with Me":
+    st.header(f"📂 Pending Claims for {role}")
+    claims = get_pending_claims(role, location)
     if not claims:
-        st.info("No claims found.")
+        st.info("No pending claims.")
     else:
-        for c in claims:
-            status = "🟠 Awaiting Budget" if c.current_stage == "Awaiting Budget" else c.status
-            assigned = db.query(User).get(c.assigned_to).name if c.assigned_to else "Unassigned"
-            st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | "
-                        f"**Stage:** {c.current_stage} | **Status:** {status} | **Assigned:** {assigned}")
-            logs = db.query(WorkflowLog).filter(WorkflowLog.claim_id == c.id).order_by(WorkflowLog.timestamp).all()
-            if logs:
-                df = pd.DataFrame([
-                    {
-                        "Stage": L.stage, "Action": L.action, "Remarks": L.remarks,
-                        "By": db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else "System",
-                        "Time": L.timestamp
-                    } for L in logs
-                ])
-                st.dataframe(df)
-    db.close(); st.stop()
+        for cl in claims:
+            st.subheader(f"Claim ID: {cl[0]} | ₹{cl[4]} | {cl[2]}")
+            st.write(f"Bill No: {cl[3]} | Remarks: {cl[6]}")
+            remarks = st.text_area(f"Remarks for Claim {cl[0]}", key=f"r_{cl[0]}")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                if st.button(f"Forward {cl[0]}", key=f"fwd_{cl[0]}"):
+                    next_roles = {"Diarist":"Auditor","Auditor":"AAO","AAO":"SAO","SAO":"Director","Director":"DDO"}
+                    process_claim(cl[0], "Forwarded", remarks, next_roles.get(role))
+            with col2:
+                if st.button(f"Return {cl[0]}", key=f"ret_{cl[0]}"):
+                    process_claim(cl[0], "Returned", remarks)
+            with col3:
+                if role in ["Auditor","AAO","SAO"] and st.button(f"Await Budget {cl[0]}", key=f"ab_{cl[0]}"):
+                    process_claim(cl[0], "Awaiting Budget", remarks)
+            with col4:
+                if role == "Director" and st.button(f"Approve {cl[0]}", key=f"appr_{cl[0]}"):
+                    process_claim(cl[0], "Approved", remarks)
 
-# ---------------- PENDING WITH ME -----------------
-if choice == "Pending With Me":
-    st.header("Claims Pending With Me")
-    roles = [r.strip() for r in (user.role or "").split(",")]
-    for role_item in roles:
-        if role_item not in WORKFLOW_CHAIN:
-            continue
-        st.subheader(f"As {role_item} — Location: {user.location}")
-        q = db.query(Claim).filter(Claim.archived == False)
-        q_stage = q.filter(Claim.current_stage == role_item)
-        awaiting_q = q.filter(Claim.current_stage == "Awaiting Budget")
-        if not has_role(user.role, "DG") and not user.is_admin:
-            q_stage = q_stage.filter(Claim.location == user.location)
-            awaiting_q = awaiting_q.filter(Claim.location == user.location)
-        if role_item == "Auditor":
-            rows_stage = q_stage.filter(
-                (Claim.assigned_to == user.id) | (Claim.assigned_to == None)
-            ).order_by(Claim.created_at).all()
-            if user.specialization != "All":
-                specs = [s.strip().lower() for s in user.specialization.split(",")]
-                rows_stage = [c for c in rows_stage if (c.assigned_to == user.id) or (c.claim_type.lower() in specs)]
-        else:
-            rows_stage = q_stage.order_by(Claim.created_at).all()
-        rows_awaiting = []
-        if has_role(user.role, "DG") or user.is_admin or role_item in AWAITING_ROLES:
-            rows_awaiting = awaiting_q.order_by(Claim.created_at).all()
-            if role_item == "Auditor":
-                rows_awaiting = [
-                    c for c in rows_awaiting
-                    if (c.assigned_to == user.id)
-                    or (c.assigned_to is None and (user.specialization == "All" or c.claim_type.lower() in specs))
-                ]
-        rows = rows_stage + rows_awaiting
-        if not rows:
-            st.info("No pending items.")
-        else:
-            for c in rows:
-                submitter = db.query(User).get(c.submitter_id)
-                submitter_name = submitter.name if submitter else "Deleted user"
-                st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | **Stage:** {c.current_stage}")
-                with st.form(f"form_{c.id}"):
-                    action_opts = ["Forward for approval", "Send back for review"]
-                    if role_item in ["Director"] or has_role(user.role, "DG"):
-                        action_opts.append("Mark Approved (complete)")
-                    if role_item in AWAITING_ROLES:
-                        action_opts.append("Mark Awaiting Budget")
-                    if c.current_stage == "Awaiting Budget" and role_item in AWAITING_ROLES:
-                        action_opts.append("Unpark and Forward")
-                    action = st.selectbox("Action", action_opts, key=f"actsel_{c.id}")
-                    remarks = st.text_area("Remarks (required)", key=f"actrem_{c.id}")
-                    assign_to_option = None
-                    if action == "Forward for approval" and get_next_role(role_item) == "Auditor":
-                        auditors = db.query(User).filter(
-                            User.role.like("%Auditor%"),
-                            User.location == c.location,
-                            User.active == True
-                        ).all()
-                        options = [f"{a.id} – {a.name} ({a.specialization})" for a in auditors]
-                        assign_choice = st.selectbox("Assign to Auditor", options, key=f"assign_{c.id}")
-                        assign_to_option = int(assign_choice.split(" – ")[0]) if assign_choice else None
-                    submit = st.form_submit_button("Confirm Action", key=f"confirm_{c.id}")
-                    if submit:
-                        if not remarks.strip():
-                            st.error("Remarks are required.")
-                        else:
-                            nxt = get_next_role(role_item)
-                            if action == "Forward for approval":
-                                if nxt == "Auditor":
-                                    target = db.query(User).get(assign_to_option) if assign_to_option else find_specialized_officer(db, c.location, c.claim_type)
-                                    c.assigned_to = target.id if target else None
-                                    c.current_stage = "Auditor"
-                                else:
-                                    c.current_stage = nxt or "AwaitingPayment"
-                                c.status = "In Progress"
-                                db.add(WorkflowLog(claim_id=c.id, stage=role_item,
-                                                   action=f"Forwarded to {c.current_stage}", remarks=remarks,
-                                                   acted_by=user.id))
-                            elif action == "Send back for review":
-                                c.current_stage = get_prev_role(role_item) or "Employee"
-                                c.status = "Returned"
-                                db.add(WorkflowLog(claim_id=c.id, stage=role_item,
-                                                   action=f"Returned to {c.current_stage}",
-                                                   remarks=remarks, acted_by=user.id))
-                            elif action == "Mark Awaiting Budget":
-                                c.current_stage = "Awaiting Budget"
-                                c.status = "Awaiting Budget"
-                                db.add(WorkflowLog(claim_id=c.id, stage=role_item,
-                                                   action="Marked Awaiting Budget", remarks=remarks,
-                                                   acted_by=user.id))
-                            elif action == "Unpark and Forward":
-                                c.current_stage = get_next_role(role_item) or "DDO"
-                                c.status = "In Progress"
-                                db.add(WorkflowLog(claim_id=c.id, stage="Awaiting Budget",
-                                                   action=f"Unparked to {c.current_stage}",
-                                                   remarks=remarks, acted_by=user.id))
-                            elif action == "Mark Approved (complete)":
-                                c.current_stage = "AwaitingPayment"
-                                c.status = "Approved"
-                                db.add(WorkflowLog(claim_id=c.id, stage=role_item,
-                                                   action="Final Approval", remarks=remarks,
-                                                   acted_by=user.id))
-                            db.commit()
-                            st.success("✅ Action processed successfully.")
-    db.close(); st.stop()
+# -----------------------------
+# ADMIN SECTION
+# -----------------------------
+elif role == "Admin" and choice == "Manage Users":
+    st.header("👤 Manage Users")
 
-# ---------------- DASHBOARD -----------------
-if choice == "Dashboard":
-    if not (has_role(user.role, "Director") or has_role(user.role, "DG")):
-        st.error("Dashboard restricted."); st.stop()
-    st.header("Dashboard")
-    cols = st.columns(4)
-    with cols[0]:
-        loc = st.selectbox("Location", ["All","New Delhi","Mumbai","Kolkata","Chennai","Bangalore"], key="dash_loc")
-    with cols[1]:
-        ctype = st.selectbox("Claim Type", ["All","Medical","Travel","LTC","Other"], key="dash_type")
-    with cols[2]:
-        stage = st.selectbox("Stage", ["All"] + WORKFLOW_CHAIN + ["Awaiting Budget","Returned","Approved"], key="dash_stage")
-    with cols[3]:
-        min_days = st.number_input("Minimum Days Pending", min_value=0, value=0, key="dash_mindays")
-    q = db.query(Claim).filter(Claim.archived == False)
-    if loc != "All": q = q.filter(Claim.location == loc)
-    if ctype != "All": q = q.filter(Claim.claim_type == ctype)
-    if stage != "All": q = q.filter(Claim.current_stage == stage)
-    claims = q.all()
-    data = []
-    for c in claims:
-        days = (datetime.now() - c.created_at).days if c.created_at else 0
-        if days >= min_days:
-            assigned = db.query(User).get(c.assigned_to).name if c.assigned_to else "Unassigned"
-            data.append({
-                "UID": c.uid, "Type": c.claim_type, "Amount": c.amount,
-                "Stage": c.current_stage, "Status": c.status,
-                "Location": c.location, "Days": days, "Assigned": assigned
-            })
-    if not data:
-        st.info("No matching claims found.")
+    # Add User
+    name = st.text_input("Name", key="admin_user_create_name")
+    email = st.text_input("Email", key="admin_user_create_email")
+    password = st.text_input("Password", key="admin_user_create_password", type="password")
+    role_sel = st.selectbox("Role", ["Diarist","Auditor","AAO","SAO","Director","DDO","Claimant","DG"], key="admin_user_create_role")
+    location_sel = st.selectbox("Location", ["New Delhi","Mumbai","Chennai","Kolkata","Bangalore"], key="admin_user_create_location")
+
+    if st.button("Add / Update User", key="admin_user_create_button"):
+        hashed_pwd = generate_password_hash(password)
+        c.execute("INSERT OR REPLACE INTO users (name,email,password,role,location) VALUES (?,?,?,?,?)",
+                  (name,email,hashed_pwd,role_sel,location_sel))
+        conn.commit()
+        st.success(f"User {name} added or updated successfully.")
+
+    st.divider()
+
+    # Deactivate user
+    c.execute("SELECT email FROM users WHERE role!='Admin'")
+    users_list = [u[0] for u in c.fetchall()]
+    del_user = st.selectbox("Select user to deactivate", users_list, key="admin_user_delete_select")
+    if st.button("Deactivate", key="admin_user_delete_button"):
+        c.execute("DELETE FROM users WHERE email=?", (del_user,))
+        conn.commit()
+        st.warning(f"User {del_user} deactivated.")
+
+elif role == "Admin" and choice == "Export Data":
+    st.header("📦 Export Data")
+    claims_df = pd.read_sql_query("SELECT * FROM claims", conn)
+    users_df = pd.read_sql_query("SELECT * FROM users", conn)
+    wf_df = pd.read_sql_query("SELECT * FROM workflow", conn)
+
+    st.download_button("⬇️ Download Claims CSV", claims_df.to_csv(index=False), "claims.csv")
+    st.download_button("⬇️ Download Users CSV", users_df.to_csv(index=False), "users.csv")
+    st.download_button("⬇️ Download Workflow CSV", wf_df.to_csv(index=False), "workflow.csv")
+
+# -----------------------------
+# DG DASHBOARD
+# -----------------------------
+elif role == "DG" and choice == "Dashboard":
+    st.header("📊 DG Dashboard (All Locations)")
+    c.execute("SELECT type,status,current_role,location,created_at FROM claims")
+    data = pd.DataFrame(c.fetchall(), columns=["Type","Status","Current Role","Location","Created At"])
+    if not data.empty:
+        location_filter = st.multiselect("Filter by Location", sorted(data["Location"].unique()), default=sorted(data["Location"].unique()))
+        type_filter = st.multiselect("Filter by Claim Type", sorted(data["Type"].unique()), default=sorted(data["Type"].unique()))
+        filtered = data[(data["Location"].isin(location_filter)) & (data["Type"].isin(type_filter))]
+        st.dataframe(filtered)
+        fig = px.histogram(filtered, x="Status", color="Type", barmode="group", title="Claims by Status and Type")
+        st.plotly_chart(fig)
     else:
-        df = pd.DataFrame(data)
-        tab1, tab2 = st.tabs(["📋 Summary", "📊 Visuals"])
-        with tab1:
-            st.dataframe(df)
-            st.subheader("Average Processing Time per Role")
-            logs = pd.read_sql(db.query(WorkflowLog).statement, db.bind)
-            if not logs.empty:
-                logs["timestamp"] = pd.to_datetime(logs["timestamp"])
-                logs["prev"] = logs.groupby("claim_id")["timestamp"].shift(1)
-                logs["delta_days"] = (logs["timestamp"] - logs["prev"]).dt.total_seconds() / 86400
-                avg = logs.groupby("stage")["delta_days"].mean().reset_index().dropna()
-                if not avg.empty:
-                    st.dataframe(avg.rename(columns={"stage": "Role", "delta_days": "Avg Days"}))
-        with tab2:
-            df["flag"] = df["Stage"].apply(lambda x: "Awaiting Budget" if x == "Awaiting Budget" else "Other")
-            st.plotly_chart(px.bar(df, x="Stage", color="flag", title="Claims by Stage (🟠 Awaiting Budget Highlighted)"))
-            st.plotly_chart(px.pie(df, names="Type", title="Claims by Type"))
-            st.plotly_chart(px.bar(df, x="Location", y="Amount", title="Total Amount by Location"))
-    db.close(); st.stop()
+        st.info("No claim data available.")
 
-st.caption("DGACE-ESD Claim Track v3.6 – Multi-specialization + Role Segregation + Dashboard Enhancements")
+# -----------------------------
+# LOGOUT
+# -----------------------------
+elif choice == "Logout":
+    logout()
