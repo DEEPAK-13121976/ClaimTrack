@@ -116,8 +116,8 @@ def find_specialized_officer(db, location, claim_type):
     return auditors[0] if auditors else None
 
 # ---------------- STREAMLIT CONFIG -----------------
-st.set_page_config(page_title="DGACE-ESD Claim Track", layout="wide")
-st.title("DGACE-ESD Claim Track")
+st.set_page_config(page_title="DGACE-ESD Bill Tracking System", layout="wide")
+st.title("DGACE-ESD Bill Tracking System")
 
 if "user" not in st.session_state:
     st.session_state["user"] = None
@@ -471,4 +471,4 @@ if choice == "Dashboard":
             st.plotly_chart(px.bar(df, x="Location", y="Amount", title="Total Amount by Location"))
     db.close(); st.stop()
 
-st.caption("DGACE-ESD Claim Track v3.6 – Multi-specialization + Role Segregation + Dashboard Enhancements")
+st.caption("DGACE-ESD Bill Tracking System – Multi-specialization + Role Segregation + Dashboard Enhancements")
