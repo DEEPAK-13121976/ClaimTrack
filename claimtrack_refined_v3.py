@@ -18,6 +18,23 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, Text, Date
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# ==============================================================
+# 🔧 MAINTENANCE MODE (Enable this when DB compute hours are exhausted)
+# ==============================================================
+MAINTENANCE_MODE = True   # Set to False once compute is restored
+
+if MAINTENANCE_MODE:
+    st.title("🔧 ClaimTrack – Under Maintenance")
+    st.warning("""
+    The ClaimTrack system is temporarily unavailable  
+    while compute resources are being restored.
+
+    Please check back soon.
+    """)
+    st.stop()
+# ==============================================================
+
+
 # ---------------- CONFIG -----------------
 DEFAULT_SQLITE = "sqlite:///data/claims_refined_v3.db"
 DB_URL = os.environ.get("DATABASE_URL", DEFAULT_SQLITE)
