@@ -17,33 +17,6 @@ import streamlit as st
 from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from werkzeug.security import generate_password_hash, check_password_hash
-# ------------------ CACHED QUERY UTILITY ------------------
-def cached_query(key, fn, ttl=30):
-    """Cache the result of a callable `fn` using Streamlit's cache_data.
-    key is a simple identifier used for readability; different callables with same key will collide,
-    so use unique keys for different queries. TTL is in seconds.
-    Usage: cached_query('active_users', lambda: db.query(User).filter(...).all(), ttl=30)
-    """
-    @st.cache_data(ttl=ttl)
-    def _inner():
-        return fn()
-    return _inner()
-# ==============================================================
-# 🔧 MAINTENANCE MODE (Enable this when DB compute hours are exhausted)
-# ==============================================================
-MAINTENANCE_MODE = False   # Set to False once compute is restored
-
-if MAINTENANCE_MODE:
-    st.title("🔧 ClaimTrack – Under Maintenance")
-    st.warning("""
-    The ClaimTrack system is temporarily unavailable  
-    while compute resources are being restored.
-
-    Please check back soon.
-    """)
-    st.stop()
-# ==============================================================
-
 
 # ---------------- CONFIG -----------------
 DEFAULT_SQLITE = "sqlite:///data/claims_refined_v3.db"
@@ -157,8 +130,6 @@ if not db.query(User).filter(User.email == "admin@org.in").first():
                 role="Admin", location="New Delhi",
                 specialization="All", is_admin=True))
     db.commit()
-    st.cache_data.clear()
-
 db.close()
 
 # ---------------- LOGIN/SIGNUP -----------------
@@ -194,7 +165,6 @@ def signup():
                 password_hash=generate_password_hash(pwd),
                 role="Claimant", location=loc))
             db.commit()
-            st.cache_data.clear()
             st.success("Account created successfully!")
         db.close()
 
@@ -253,16 +223,13 @@ if choice == "Admin":
         existing = db.query(User).filter(User.email == email).first()
         if existing:
             existing.role, existing.specialization, existing.location, existing.phone = role, spec, loc, phone
-            db.commit(); st.cache_data.clear(); st.success("User updated successfully")
+            db.commit(); st.success("User updated successfully")
         else:
             db.add(User(name=name or email, email=email,
                 password_hash=generate_password_hash(pwd),
                 role=role, specialization=spec,
                 location=loc, phone=phone))
-            db.commit()
-            st.cache_data.clear()
-            st.success("User added successfully")
-
+            db.commit(); st.success("User added successfully")
     st.markdown("---")
     st.subheader("Reset Password")
     reset_email = st.text_input("Email to reset", key="reset_email")
@@ -271,26 +238,18 @@ if choice == "Admin":
         target = db.query(User).filter(User.email == reset_email).first()
         if target:
             target.password_hash = generate_password_hash(new_pwd)
-            db.commit()
-            st.cache_data.clear()
-            st.success("Password reset successfully")
-
+            db.commit(); st.success("Password reset successfully")
         else:
             st.error("User not found")
 
     st.markdown("---")
     st.subheader("Deactivate User")
-    # Do not cache ORM objects here. The list is small anyway.
     active_users = db.query(User).filter(User.active == True, User.is_admin == False).all()
-    sel = st.selectbox(
-        "Select user",
-        [f"{u.name} ({u.email}) – {u.role} – {u.specialization}" for u in active_users]
-    )
-
+    sel = st.selectbox("Select user", [f"{u.name} ({u.email}) – {u.role} – {u.specialization}" for u in active_users])
     if st.button("Deactivate", key="deactivate_btn"):
         for u in active_users:
             if f"{u.name} ({u.email}) – {u.role} – {u.specialization}" == sel:
-                u.active = False; db.commit(); st.cache_data.clear(); st.success("User deactivated.")
+                u.active = False; db.commit(); st.success("User deactivated.")
     st.markdown("---")
     st.dataframe(pd.read_sql(db.query(User).statement, db.bind)[["id","name","email","role","specialization","location","active"]])
     db.close(); st.stop()
@@ -304,6 +263,7 @@ if choice == "Submit Claim":
         dob = st.date_input("Bill Date", key="submit_dob")
         remarks = st.text_area("Remarks (optional)", key="submit_remarks")
         submit = st.form_submit_button("Submit Claim", key="submit_claim_btn")
+
         if submit:
             if amt <= 0:
                 st.error("Please enter a valid amount")
@@ -314,129 +274,46 @@ if choice == "Submit Claim":
                     amount=amt, date_of_bill=str(dob), remarks=remarks,
                     location=user.location, status="Pending", current_stage="Diarist"
                 )
-                # First workflow stage must be Diarist
-                claim.current_stage = "Diarist"
-                # Auto-assign the claim to a Diarist, not an Auditor
-                diarist = db.query(User).filter(
-                    User.role == "Diarist",
-                    User.active == True,
-                    User.location == user.location
-                ).first()
-                if diarist:
-                    claim.assigned_to = diarist.id
-                else:
-                    claim.assigned_to = None  # fallback: unassigned for Diarist pool
-                db.add(claim)
-                db.commit()
-                st.cache_data.clear()
-
+                officer = find_specialized_officer(db, user.location, ctype)
+                if officer:
+                    claim.assigned_to = officer.id
+                    claim.current_stage = "Auditor"
+                db.add(claim); db.commit()
                 db.add(WorkflowLog(
                     claim_id=claim.id, stage="Employee",
                     action="Submitted", remarks="Initial submission", acted_by=user.id
                 ))
                 db.commit()
-                st.cache_data.clear()
-                st.success(f"Claim {uid} submitted successfully and routed to Diarist")
+                st.success(f"Claim {uid} submitted successfully "
+                           f"and routed to Auditor: {officer.name if officer else 'Auto assignment pending'}")
     db.close(); st.stop()
 
 # ---------------- MY CLAIMS -----------------
 if choice == "My Claims":
     st.header("My Claims Overview")
-
-    # Allow claimant to optionally view completed claims
-    if user.role == "Claimant":
-        show_completed = st.checkbox("Show completed claims", value=False, key="show_completed_claims")
-        q = db.query(Claim).filter(Claim.submitter_id == user.id, Claim.archived == False)
-        if not show_completed:
-            # Avoid returning fully approved/closed claims by default.
-            # Adjust the filter if your schema uses a different status string for approved.
-            q = q.filter(Claim.current_stage != "Director")
-        # limit to most recent 200 for performance
-        claims = cached_query(
-            'my_claims_' + str(user.id),
-            lambda: [
-                {
-                    "id": c.id,
-                    "uid": c.uid,
-                    "claim_type": c.claim_type,
-                    "amount": c.amount,
-                    "current_stage": c.current_stage,
-                    "assigned_to": c.assigned_to,
-                    "archived": c.archived,
-                    "created_at": c.created_at.isoformat(),
-                }
-                for c in q.order_by(Claim.created_at.desc()).limit(200).all()
-            ],
-            ttl=30
-        )
-
-    else:
-        # For non-claimants (officials/admin), fetch claims with a reasonable limit and caching
-        q = db.query(Claim).filter(Claim.archived == False)
-        claims = cached_query(
-            'my_claims_officials_' + str(user.id),
-            lambda: [
-                {
-                    "id": c.id,
-                    "uid": c.uid,
-                    "claim_type": c.claim_type,
-                    "amount": c.amount,
-                    "current_stage": c.current_stage,
-                    "assigned_to": c.assigned_to,
-                    "archived": c.archived,
-                    "created_at": c.created_at.isoformat(),
-                }
-                for c in q.order_by(Claim.created_at.desc()).limit(500).all()
-            ],
-            ttl=15
-        )
-
+    claims = db.query(Claim).filter(
+        Claim.submitter_id == user.id, Claim.archived == False
+    ).order_by(Claim.created_at.desc()).all()
     if not claims:
         st.info("No claims found.")
     else:
-        # Batch fetch assigned user names to avoid per-claim db.get calls (N+1)
-        assigned_ids = list({c["assigned_to"] for c in claims if c["assigned_to"]})
-        assigned_map = {}
-        if assigned_ids:
-            # Fetch ORM objects directly (assigned_ids is tiny)
-            users = db.query(User).filter(User.id.in_(assigned_ids)).all()
-            assigned_map = {u.id: u.name for u in users}
-
-        # For officials we will batch-fetch WorkflowLog once (avoid N+1)
-        claim_ids = [c.id for c in claims]
-        logs_map = {}
-        if claim_ids and user.role != "Claimant":
-            logs_all = db.query(WorkflowLog).filter(WorkflowLog.claim_id.in_(claim_ids)).order_by(WorkflowLog.claim_id, WorkflowLog.timestamp).all()
-            for L in logs_all:
-                logs_map.setdefault(L.claim_id, []).append(L)
-
         for c in claims:
             status = "🟠 Awaiting Budget" if c.current_stage == "Awaiting Budget" else c.status
-            assigned = assigned_map.get(c.assigned_to, "Unassigned") if c.assigned_to else "Unassigned"
-            st.markdown(
-                f"**UID:** {c.uid} | **Claimant:** {claimant_name} | "
-                f"**Type:** {c.claim_type} | **Amount:** ₹{c.amount} | "
-                f"**Stage:** {c.current_stage} | **Status:** {status} | **Assigned:** {assigned}"
-            )   
-
-            claimant_name = c.submitter.name if c.submitter else "Unknown"
-
-            # For claimants, show a lightweight summary only (no WorkflowLog details)
-            if user.role == "Claimant":
-                st.write(f"Last updated: {c.updated_at.strftime('%d %b %Y %H:%M') if c.updated_at else 'N/A'}")
-                st.divider()
-            else:
-                # Officials see full workflow logs (from the batched logs_map)
-                if logs_map.get(c.id):
-                    df = pd.DataFrame([
-                        {
-                            "Stage": L.stage, "Action": L.action, "Remarks": L.remarks,
-                            "By": (db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else "System"),
-                            "Time": L.timestamp
-                        } for L in logs_map.get(c.id, [])
-                    ])
-                    st.dataframe(df)
+            assigned = db.query(User).get(c.assigned_to).name if c.assigned_to else "Unassigned"
+            st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | "
+                        f"**Stage:** {c.current_stage} | **Status:** {status} | **Assigned:** {assigned}")
+            logs = db.query(WorkflowLog).filter(WorkflowLog.claim_id == c.id).order_by(WorkflowLog.timestamp).all()
+            if logs:
+                df = pd.DataFrame([
+                    {
+                        "Stage": L.stage, "Action": L.action, "Remarks": L.remarks,
+                        "By": db.query(User).get(L.acted_by).name if db.query(User).get(L.acted_by) else "System",
+                        "Time": L.timestamp
+                    } for L in logs
+                ])
+                st.dataframe(df)
     db.close(); st.stop()
+
 # ---------------- PENDING WITH ME -----------------
 if choice == "Pending With Me":
     st.header("Claims Pending With Me")
@@ -476,11 +353,7 @@ if choice == "Pending With Me":
             for c in rows:
                 submitter = db.query(User).get(c.submitter_id)
                 submitter_name = submitter.name if submitter else "Deleted user"
-                st.markdown(
-                    f"**UID:** {c.uid} | **Claimant:** {submitter_name} | "
-                    f"**Type:** {c.claim_type} | **Amount:** ₹{c.amount} | "
-                    f"**Stage:** {c.current_stage}"
-                )
+                st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | **Stage:** {c.current_stage}")
                 with st.form(f"form_{c.id}"):
                     action_opts = ["Forward for approval", "Send back for review"]
                     if role_item in ["Director"] or has_role(user.role, "DG"):
@@ -543,7 +416,6 @@ if choice == "Pending With Me":
                                                    action="Final Approval", remarks=remarks,
                                                    acted_by=user.id))
                             db.commit()
-                            st.cache_data.clear()
                             st.success("✅ Action processed successfully.")
     db.close(); st.stop()
 
