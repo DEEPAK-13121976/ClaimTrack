@@ -21,7 +21,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # ==============================================================
 # 🔧 MAINTENANCE MODE (Enable this when DB compute hours are exhausted)
 # ==============================================================
-MAINTENANCE_MODE = False   # Set to False once compute is restored
+MAINTENANCE_MODE = True   # Set to False once compute is restored
 
 if MAINTENANCE_MODE:
     st.title("🔧 ClaimTrack – Under Maintenance")
