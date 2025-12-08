@@ -21,7 +21,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # ==============================================================
 # 🔧 MAINTENANCE MODE (Enable this when DB compute hours are exhausted)
 # ==============================================================
-MAINTENANCE_MODE = False   # Set to False once compute is restored
+MAINTENANCE_MODE = True   # Set to False once compute is restored
 
 if MAINTENANCE_MODE:
     st.title("🔧 ClaimTrack – Under Maintenance")
@@ -273,36 +273,100 @@ if choice == "Admin":
 # ---------------- SUBMIT CLAIM -----------------
 if choice == "Submit Claim":
     st.header("Submit New Claim")
+
     with st.form("new_claim"):
         ctype = st.selectbox("Claim Type", ["Medical", "Travel", "LTC", "Other"], key="submit_type")
         amt = st.number_input("Amount (₹)", min_value=0.0, key="submit_amt")
         dob = st.date_input("Bill Date", key="submit_dob")
         remarks = st.text_area("Remarks (optional)", key="submit_remarks")
+
         submit = st.form_submit_button("Submit Claim", key="submit_claim_btn")
 
-        if submit:
-            if amt <= 0:
-                st.error("Please enter a valid amount")
-            else:
-                uid = make_uid()
-                claim = Claim(
-                    uid=uid, submitter_id=user.id, claim_type=ctype,
-                    amount=amt, date_of_bill=str(dob), remarks=remarks,
-                    location=user.location, status="Pending", current_stage="Diarist"
-                )
-                officer = find_specialized_officer(db, user.location, ctype)
-                if officer:
-                    claim.assigned_to = officer.id
-                    claim.current_stage = "Auditor"
-                db.add(claim); db.commit()
-                db.add(WorkflowLog(
-                    claim_id=claim.id, stage="Employee",
-                    action="Submitted", remarks="Initial submission", acted_by=user.id
-                ))
-                db.commit()
-                st.success(f"Claim {uid} submitted successfully "
-                           f"and routed to Auditor: {officer.name if officer else 'Auto assignment pending'}")
-    db.close(); st.stop()
+    if submit:
+
+        # ----------- VALIDATION ------------
+        if amt <= 0:
+            st.error("Please enter a valid amount")
+            st.stop()
+
+        # -------------------------------------------------------------
+        # 1️⃣ DUPLICATE CHECK: Amount + Bill Date + Type + User
+        # -------------------------------------------------------------
+        duplicate = db.query(Claim).filter(
+            Claim.submitter_id == user.id,
+            Claim.amount == amt,
+            Claim.date_of_bill == str(dob),
+            Claim.claim_type == ctype
+        ).first()
+
+        if duplicate:
+            st.warning(
+                f"A similar claim already exists:\n\n"
+                f"• Claim ID: {duplicate.uid}\n"
+                f"• Type: {ctype}\n"
+                f"• Amount: ₹{amt}\n"
+                f"• Bill Date: {dob}\n\n"
+                "If this was accidental, press *Cancel*. "
+                "If intentional, click *Submit Anyway* to continue."
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                proceed = st.button("Submit Anyway")
+            with col2:
+                cancel = st.button("Cancel")
+
+            if cancel:
+                st.info("Submission cancelled.")
+                st.stop()
+
+            if not proceed:
+                st.stop()       # Stop until user decides
+
+        # -------------------------------------------------------------
+        # 2️⃣ PROCEED WITH NORMAL CLAIM CREATION
+        # -------------------------------------------------------------
+
+        uid = make_uid()
+        claim = Claim(
+            uid=uid,
+            submitter_id=user.id,
+            claim_type=ctype,
+            amount=amt,
+            date_of_bill=str(dob),
+            remarks=remarks,
+            location=user.location,
+            status="Pending",
+            current_stage="Diarist"
+        )
+
+        # Officer assignment (unchanged)
+        officer = find_specialized_officer(db, user.location, ctype)
+        if officer:
+            claim.assigned_to = officer.id
+            claim.current_stage = "Auditor"
+
+        db.add(claim)
+        db.commit()
+
+        # Workflow log (unchanged)
+        db.add(WorkflowLog(
+            claim_id=claim.id,
+            stage="Employee",
+            action="Submitted",
+            remarks="Initial submission",
+            acted_by=user.id
+        ))
+        db.commit()
+
+        st.success(
+            f"Claim {uid} submitted successfully and routed to Auditor: "
+            f"{officer.name if officer else 'Auto assignment pending'}"
+        )
+
+        db.close()
+        st.stop()
+
 
 # ---------------- MY CLAIMS -----------------
 if choice == "My Claims":
