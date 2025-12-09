@@ -268,6 +268,68 @@ if choice == "Admin":
                 u.active = False; db.commit(); st.success("User deactivated.")
     st.markdown("---")
     st.dataframe(pd.read_sql(db.query(User).statement, db.bind)[["id","name","email","role","specialization","location","active"]])
+    
+    # ------------------------------------------------------------------
+    # ARCHIVE / RESTORE CLAIMS SECTION
+    # ------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("📁 Archive / Restore Claims")
+
+    tab1, tab2 = st.tabs(["🟢 Active Claims", "🗄️ Archived Claims"])
+
+    # ---------------- ACTIVE CLAIMS (ARCHIVE) ----------------
+    with tab1:
+        st.write("Select claims to archive:")
+
+        active_claims = db.query(Claims).filter(Claims.archived == False).all()
+
+        if active_claims:
+            selected_to_archive = st.multiselect(
+                "Active Claims:",
+                options=[c.id for c in active_claims],
+                format_func=lambda cid: f"Claim #{cid} — {next(c.current_stage for c in active_claims if c.id == cid)}"
+            )
+
+            if st.button("📦 Archive Selected Claims", type="primary"):
+                if selected_to_archive:
+                    for cid in selected_to_archive:
+                        claim = db.query(Claims).get(cid)
+                        claim.archived = True
+                    db.commit()
+                    st.success("Selected claims archived successfully.")
+                    st.experimental_rerun()
+                else:
+                    st.warning("No claim selected.")
+        else:
+            st.info("No active claims found.")
+
+    # ---------------- ARCHIVED CLAIMS (RESTORE) ----------------
+    with tab2:
+        st.write("Select archived claims to restore:")
+
+        archived_claims = db.query(Claims).filter(Claims.archived == True).all()
+
+        if archived_claims:
+            selected_to_restore = st.multiselect(
+                "Archived Claims:",
+                options=[c.id for c in archived_claims],
+                format_func=lambda cid: f"Claim #{cid} — {next(c.current_stage for c in archived_claims if c.id == cid)}"
+            )
+
+            if st.button("♻️ Restore Selected Claims"):
+                if selected_to_restore:
+                    for cid in selected_to_restore:
+                        claim = db.query(Claims).get(cid)
+                        claim.archived = False
+                    db.commit()
+                    st.success("Selected claims restored successfully.")
+                    st.experimental_rerun()
+                else:
+                    st.warning("No claim selected.")
+        else:
+            st.info("No archived claims found.")
+
+
     db.close(); st.stop()
 
 # ---------------- SUBMIT CLAIM -----------------
