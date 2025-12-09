@@ -17,6 +17,8 @@ import streamlit as st
 from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from werkzeug.security import generate_password_hash, check_password_hash
+from models import User, Claim
+
 
 # ==============================================================
 # 🔧 MAINTENANCE MODE (Enable this when DB compute hours are exhausted)
@@ -281,7 +283,7 @@ if choice == "Admin":
     with tab1:
         st.write("Select claims to archive:")
 
-        active_claims = db.query(Claims).filter(Claims.archived == False).all()
+        active_claims = db.query(Claim).filter(Claim.archived == False).all()
 
         if active_claims:
             selected_to_archive = st.multiselect(
@@ -293,7 +295,7 @@ if choice == "Admin":
             if st.button("📦 Archive Selected Claims", type="primary"):
                 if selected_to_archive:
                     for cid in selected_to_archive:
-                        claim = db.query(Claims).get(cid)
+                        claim = db.query(Claim).get(cid)
                         claim.archived = True
                     db.commit()
                     st.success("Selected claims archived successfully.")
@@ -307,7 +309,7 @@ if choice == "Admin":
     with tab2:
         st.write("Select archived claims to restore:")
 
-        archived_claims = db.query(Claims).filter(Claims.archived == True).all()
+        archived_claims = db.query(Claim).filter(Claim.archived == True).all()
 
         if archived_claims:
             selected_to_restore = st.multiselect(
@@ -319,7 +321,7 @@ if choice == "Admin":
             if st.button("♻️ Restore Selected Claims"):
                 if selected_to_restore:
                     for cid in selected_to_restore:
-                        claim = db.query(Claims).get(cid)
+                        claim = db.query(Claim).get(cid)
                         claim.archived = False
                     db.commit()
                     st.success("Selected claims restored successfully.")
