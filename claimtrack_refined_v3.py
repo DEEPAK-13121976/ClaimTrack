@@ -22,7 +22,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # ==============================================================
 # 🔧 MAINTENANCE MODE (Enable this when DB compute hours are exhausted)
 # ==============================================================
-MAINTENANCE_MODE = False   # Set to False once compute is restored
+MAINTENANCE_MODE = True   # Set to False once compute is restored
 
 if MAINTENANCE_MODE:
     st.title("🔧 ClaimTrack – Under Maintenance")
@@ -288,7 +288,11 @@ if choice == "Admin":
             selected_to_archive = st.multiselect(
                 "Active Claims:",
                 options=[c.id for c in active_claims],
-                format_func=lambda cid: f"Claim #{cid} — {next(c.current_stage for c in active_claims if c.id == cid)}"
+                format_func=lambda cid: next(
+                    f"{c.uid} — {c.claim_type} — ₹{c.amount} — {c.submitter.name if c.submitter else 'Unknown'} — {c.current_stage}"
+                    for c in active_claims if c.id == cid
+                )
+
             )
 
             if st.button("📦 Archive Selected Claims", type="primary"):
@@ -314,7 +318,11 @@ if choice == "Admin":
             selected_to_restore = st.multiselect(
                 "Archived Claims:",
                 options=[c.id for c in archived_claims],
-                format_func=lambda cid: f"Claim #{cid} — {next(c.current_stage for c in archived_claims if c.id == cid)}"
+                format_func=lambda cid: next(
+                    f"{c.uid} — {c.claim_type} — ₹{c.amount} — {c.submitter.name if c.submitter else 'Unknown'} — ARCHIVED"
+                    for c in archived_claims if c.id == cid
+                )
+
             )
 
             if st.button("♻️ Restore Selected Claims"):
@@ -445,6 +453,30 @@ if choice == "My Claims":
             assigned = db.query(User).get(c.assigned_to).name if c.assigned_to else "Unassigned"
             st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | "
                         f"**Stage:** {c.current_stage} | **Status:** {status} | **Assigned:** {assigned}")
+            
+            # ------------------------------------------------------------
+            # ⭐ NEW FEATURE: RESUBMIT CLAIM IF RETURNED TO EMPLOYEE
+            # ------------------------------------------------------------
+            if c.current_stage == "Employee" and c.status == "Returned":
+                st.warning("This claim has been returned for correction.")
+
+                if st.button(f"🔄 Resubmit Claim {c.uid}", key=f"resub_{c.id}"):
+                    c.current_stage = "Diarist"          # Send back into workflow
+                    c.status = "Pending"
+
+                    db.add(WorkflowLog(
+                        claim_id=c.id,
+                        stage="Employee",
+                        action="Resubmitted",
+                        remarks="Claim resubmitted after correction",
+                        acted_by=user.id
+                    ))
+                    db.commit()
+
+                    st.success("Claim resubmitted successfully! It has been sent to Diarist.")
+                    st.rerun()
+
+            
             logs = db.query(WorkflowLog).filter(WorkflowLog.claim_id == c.id).order_by(WorkflowLog.timestamp).all()
             if logs:
                 df = pd.DataFrame([
