@@ -17,7 +17,6 @@ import streamlit as st
 from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 from werkzeug.security import generate_password_hash, check_password_hash
-from models import User, Claim
 
 
 # ==============================================================
