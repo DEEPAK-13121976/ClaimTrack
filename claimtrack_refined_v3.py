@@ -494,9 +494,13 @@ if choice == "Pending With Me":
             st.info("No pending items.")
         else:
             for c in rows:
-                submitter = db.query(User).get(c.submitter_id)
-                submitter_name = submitter.name if submitter else "Deleted user"
-                st.markdown(f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | **Stage:** {c.current_stage}")
+                submitter_name = c.submitter.name if c.submitter else "Deleted user"
+
+                st.markdown(
+                    f"**Claimant:** {submitter_name}  \n"
+                    f"**UID:** {c.uid} | **Type:** {c.claim_type} | **Amount:** ₹{c.amount} | **Stage:** {c.current_stage}"
+                )
+
                 with st.form(f"form_{c.id}"):
                     action_opts = ["Forward for approval", "Send back for review"]
                     if role_item in ["Director"] or has_role(user.role, "DG"):
@@ -587,10 +591,17 @@ if choice == "Dashboard":
         if days >= min_days:
             assigned = db.query(User).get(c.assigned_to).name if c.assigned_to else "Unassigned"
             data.append({
-                "UID": c.uid, "Type": c.claim_type, "Amount": c.amount,
-                "Stage": c.current_stage, "Status": c.status,
-                "Location": c.location, "Days": days, "Assigned": assigned
+                "UID": c.uid,
+                "Claimant": c.submitter.name if c.submitter else "Deleted user",
+                "Type": c.claim_type,
+                "Amount": c.amount,
+                "Stage": c.current_stage,
+                "Status": c.status,
+                "Location": c.location,
+                "Days": days,
+                "Assigned": assigned
             })
+
     if not data:
         st.info("No matching claims found.")
     else:
