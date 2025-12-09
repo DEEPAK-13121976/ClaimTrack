@@ -298,7 +298,7 @@ if choice == "Admin":
                         claim.archived = True
                     db.commit()
                     st.success("Selected claims archived successfully.")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.warning("No claim selected.")
         else:
@@ -324,7 +324,7 @@ if choice == "Admin":
                         claim.archived = False
                     db.commit()
                     st.success("Selected claims restored successfully.")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.warning("No claim selected.")
         else:
