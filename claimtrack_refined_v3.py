@@ -46,6 +46,20 @@ Base = declarative_base()
 WORKFLOW_CHAIN = ["Diarist", "Auditor", "AAO", "SAO", "Director", "DDO"]
 AWAITING_ROLES = ["Auditor", "AAO", "SAO"]
 
+
+# ---------------- GLOBAL DASHBOARD ACCESS -----------------
+GLOBAL_DASHBOARD_USERS = {
+    "pdaesd@cag.gov.in"         # add official DG emails here
+}
+
+def has_global_dashboard_access(user):
+    return (
+        user.is_admin
+        or user.email in GLOBAL_DASHBOARD_USERS
+        or has_role(user.role, "DG")
+    )
+
+
 # ---------------- MODELS -----------------
 class User(Base):
     __tablename__ = "users"
@@ -199,7 +213,12 @@ if user.role == "Claimant":
     menu = ["Submit Claim", "My Claims"]
 else:
     menu = ["Pending With Me", "My Claims"]
-    if has_role(user.role, "Director") or has_role(user.role, "DG"):
+    if (
+        has_role(user.role, "Director")
+        or has_role(user.role, "DG")
+        or user.is_admin
+        or user.email in GLOBAL_DASHBOARD_USERS
+    ):
         menu.append("Dashboard")
     if user.is_admin:
         menu.append("Admin")
@@ -600,7 +619,12 @@ if choice == "Pending With Me":
 
 # ---------------- DASHBOARD -----------------
 if choice == "Dashboard":
-    if not (has_role(user.role, "Director") or has_role(user.role, "DG")):
+    if not (
+        has_role(user.role, "Director")
+        or has_role(user.role, "DG")
+        or user.is_admin
+        or user.email in GLOBAL_DASHBOARD_USERS
+    ):
         st.error("Dashboard restricted."); st.stop()
     st.header("Dashboard")
     cols = st.columns(4)
@@ -613,6 +637,12 @@ if choice == "Dashboard":
     with cols[3]:
         min_days = st.number_input("Minimum Days Pending", min_value=0, value=0, key="dash_mindays")
     q = db.query(Claim).filter(Claim.archived == False)
+
+    # Director → restricted to own location
+    # DG/Admin → global
+    if not has_global_dashboard_access(user):
+        q = q.filter(Claim.location == user.location)
+
     if loc != "All": q = q.filter(Claim.location == loc)
     if ctype != "All": q = q.filter(Claim.claim_type == ctype)
     if stage != "All": q = q.filter(Claim.current_stage == stage)
