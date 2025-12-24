@@ -36,10 +36,20 @@ if MAINTENANCE_MODE:
 # ==============================================================
 
 # ---------------- CONFIG -----------------
+from sqlalchemy.pool import NullPool
+
 DEFAULT_SQLITE = "sqlite:///data/claims_refined_v3.db"
 DB_URL = os.environ.get("DATABASE_URL", DEFAULT_SQLITE)
 os.makedirs("data", exist_ok=True)
-engine = create_engine(DB_URL, echo=False, future=True)
+
+# Use NullPool for Neon / serverless DBs to allow autosuspend
+engine = create_engine(
+    DB_URL,
+    echo=False,
+    future=True,
+    poolclass=NullPool
+)
+
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
