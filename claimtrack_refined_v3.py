@@ -101,11 +101,16 @@ class WorkflowLog(Base):
     timestamp = Column(DateTime, default=func.now())
 
 # ---------------- DATABASE INITIALIZATION -----------------
-try:
-    # Base.metadata.drop_all(engine)   # Uncomment ONCE if schema mismatch occurs
-    Base.metadata.create_all(engine)
-except Exception as e:
-    print("⚠️ Database initialization error:", e)
+# Only create tables for local SQLite (DEV).
+# Do NOT touch Neon DB schema on every app start.
+if DB_URL.startswith("sqlite"):
+    try:
+        Base.metadata.create_all(engine)
+    except Exception as e:
+        print("⚠️ Database initialization error:", e)
+
+
+
 
 def get_db(): return SessionLocal()
 def make_uid():
@@ -149,15 +154,23 @@ st.title("DGACE-ESD Bill Tracking System")
 if "user" not in st.session_state:
     st.session_state["user"] = None
 
-# Seed admin
-db = get_db()
-if not db.query(User).filter(User.email == "admin@org.in").first():
-    db.add(User(name="Admin", email="admin@org.in",
-                password_hash=generate_password_hash("admin123"),
-                role="Admin", location="New Delhi",
-                specialization="All", is_admin=True))
-    db.commit()
-db.close()
+
+# Seed admin ONLY when a real user session exists
+if not MAINTENANCE_MODE and st.session_state.get("user"):
+    db = get_db()
+    if not db.query(User).filter(User.email == "admin@org.in").first():
+        db.add(User(
+            name="Admin",
+            email="admin@org.in",
+            password_hash=generate_password_hash("admin123"),
+            role="Admin",
+            location="New Delhi",
+            specialization="All",
+            is_admin=True
+        ))
+        db.commit()
+    db.close()
+
 
 # ---------------- LOGIN/SIGNUP -----------------
 def login():
