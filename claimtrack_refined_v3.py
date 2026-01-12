@@ -642,6 +642,11 @@ if choice == "Dashboard":
     with cols[3]:
         min_days = st.number_input("Minimum Days Pending", min_value=0, value=0, key="dash_mindays")
     q = db.query(Claim).filter(Claim.archived == False)
+
+    # Restrict Director to own location (DG/Admin see all)
+    if has_role(user.role, "Director") and not has_role(user.role, "DG") and not user.is_admin:
+        q = q.filter(Claim.location == user.location)
+
     if loc != "All": q = q.filter(Claim.location == loc)
     if ctype != "All": q = q.filter(Claim.claim_type == ctype)
     if stage != "All": q = q.filter(Claim.current_stage == stage)
