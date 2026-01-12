@@ -434,11 +434,9 @@ if choice == "Submit Claim":
             current_stage="Diarist"
         )
 
-        # Officer assignment (unchanged)
-        officer = find_specialized_officer(db, user.location, ctype)
-        if officer:
-            claim.assigned_to = officer.id
-            claim.current_stage = "Auditor"
+        # Do NOT skip Diarist on initial submission
+        claim.current_stage = "Diarist"
+        claim.assigned_to = None
 
         db.add(claim)
         db.commit()
@@ -557,9 +555,17 @@ if choice == "Pending With Me":
                 )
 
                 with st.form(f"form_{c.id}"):
-                    action_opts = ["Forward for approval", "Send back for review"]
+                    # Base action for everyone
+                    action_opts = ["Send back for review"]
+
+                    # Forward only for non-Director levels
+                    if role_item not in ["Director"] and not has_role(user.role, "DG"):
+                        action_opts.insert(0, "Forward for approval")
+
+                    # Approval only for Director / DG
                     if role_item in ["Director"] or has_role(user.role, "DG"):
                         action_opts.append("Mark Approved (complete)")
+
                     if role_item in AWAITING_ROLES:
                         action_opts.append("Mark Awaiting Budget")
                     if c.current_stage == "Awaiting Budget" and role_item in AWAITING_ROLES:
