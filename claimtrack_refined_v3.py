@@ -452,9 +452,10 @@ if choice == "Submit Claim":
         db.commit()
 
         st.success(
-            f"Claim {uid} submitted successfully and routed to Auditor: "
-            f"{officer.name if officer else 'Auto assignment pending'}"
+            f"Claim {uid} submitted successfully and registered with Diarist. "
+            "It will be routed to the appropriate Auditor shortly."
         )
+
 
         db.close()
         st.stop()
